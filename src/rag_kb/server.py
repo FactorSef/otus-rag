@@ -8,6 +8,8 @@ from typing import Annotated, Any
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from rag_kb.config import Settings, get_settings
 from rag_kb.graph.builder import build_graph
@@ -63,6 +65,11 @@ def create_server(
 
     topic = settings.kb_topic
     mcp = FastMCP("rag-knowledge-base", instructions=_instructions(topic))
+
+    @mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+    async def health(request: Request) -> JSONResponse:
+        """Liveness probe for Docker (does not touch the LLM)."""
+        return JSONResponse({"status": "ok", "chunks": kb.store.count()})
 
     @mcp.tool(
         description=(

@@ -70,7 +70,7 @@ def question_language(question: str) -> str:
 def unique(items: list[str]) -> list[str]:
     seen, out = set(), []
     for item in items:
-        key = item.strip().lower()
+        key = " ".join(re.findall(r"\w+", item.lower()))  # ignore case and punctuation
         if key and key not in seen:
             seen.add(key)
             out.append(item.strip())

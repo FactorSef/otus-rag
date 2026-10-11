@@ -129,3 +129,14 @@ async def test_llm_unavailable_message(settings, docs_dir: Path):
         # search does not need the LLM
         found = data(await client.call_tool("find_relevant_docs", {"query": "Сойка"}))
         assert found["results"]
+
+
+async def test_health_endpoint(server):
+    import httpx
+
+    app = server.http_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "chunks": 0}

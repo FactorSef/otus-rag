@@ -51,22 +51,24 @@ MCP‑сервер, превращающий папку с документам�
 
 ## 2. Развёртывание
 
-```yaml
-services:
-  rag-server:              # всегда
-    ports: ["8000:8000"]
-    volumes: [./sample_docs:/app/sample_docs:ro, chroma:/data/chroma]
-    env_file: .env
-    extra_hosts: ["host.docker.internal:host-gateway"]   # Linux
-  ollama:                  # profiles: [local-llm]
-  ollama-init:             # profiles: [local-llm] — ollama pull $LLM_MODEL
-```
+| Сервис (`docker-compose.yml`) | Профиль | Назначение |
+|---|---|---|
+| `rag-server` | всегда | MCP‑сервер на `:8000/mcp`, `/health` для healthcheck. Тома: `./sample_docs → /app/sample_docs` (ro), `${DOCS_DIR} → /app/docs` (ro), `rag-data → /data` (индекс Chroma и состояние). `extra_hosts: host.docker.internal:host-gateway` — доступ к LLM на хосте и в Linux. |
+| `ollama` | `local-llm` | Ollama, модели в томе `ollama-models`. |
+| `ollama-init` | `local-llm` | Одноразовый `ollama pull ${LLM_MODEL}`; `rag-server` ждёт его завершения (`depends_on … required: false` — без профиля зависимость игнорируется). |
 
-- `docker compose up` — только сервер; LLM внешняя (`LLM_BASE_URL`, по умолчанию `http://host.docker.internal:11434`).
-- `docker compose --profile local-llm up` — дополнительно поднимает Ollama и скачивает модель; в `.env` указывается `LLM_BASE_URL=http://ollama:11434`.
-- Рабочая директория контейнера — `/app`, поэтому `index_folder("./sample_docs")` работает буквально. Свои документы монтируются через `DOCS_DIR`.
-- Модель эмбеддингов скачивается **на этапе сборки образа**: первый запуск не зависит от сети, индексация и поиск работают без LLM.
-- Сервер стартует, даже если LLM недоступна: проверка выполняется при старте (только предупреждение в логе) и при вызове `ask_question` (понятная ошибка с адресом и именем модели).
+- `docker compose up --build` — только сервер; LLM внешняя (`LLM_BASE_URL`, по умолчанию `http://host.docker.internal:11434`).
+- `LLM_BASE_URL=http://ollama:11434 docker compose --profile local-llm up --build` — дополнительно Ollama со скачанной моделью.
+- `.env` необязателен (`env_file … required: false`): без него работают значения по умолчанию.
+- Рабочая директория контейнера — `/app`, поэтому `index_folder("./sample_docs")` работает буквально; свои документы — через `DOCS_DIR` и `index_folder("./docs")`.
+
+**Образ** (`Dockerfile`, multi‑stage):
+
+1. `build` — `uv sync --frozen --no-dev` в `/opt/venv` (слой зависимостей кэшируется до изменения `uv.lock`).
+2. `models` — модель эмбеддингов скачивается **при сборке** (`PRELOAD_EMBEDDINGS=1`, ~2,2 ГБ для e5‑large). В рантайме `HF_HUB_OFFLINE=1`: первый запуск не зависит от сети, индексация и поиск работают без LLM. Для `EMBEDDING_PROVIDER=ollama|openai|chroma` — `PRELOAD_EMBEDDINGS=0`.
+3. `runtime` — `python:3.12-slim`, непривилегированный пользователь `app`, `HEALTHCHECK` по `/health`.
+
+Сервер стартует, даже если LLM недоступна: проверка выполняется при старте (предупреждение в логе), в `index_status` и при вызове `ask_question` (понятная ошибка с адресом и именем модели).
 
 ## 3. Конфигурация
 
@@ -219,7 +221,6 @@ START → rewrite → retrieve → grade ─┬─ relevant ≥ MIN_RELEVANT ─
 | `test_graph.py` | граф с mock LLM: прямой путь, цикл broaden, лимит повторов, «не найдено», мусорный вывод LLM, бюджет контекста |
 | `test_server_e2e.py` | in‑memory клиент FastMCP: описания инструментов, сценарий проверки из ТЗ, progress‑уведомления, ошибки, недоступная LLM |
 
-CI (GitHub Actions): `ruff check`, `ruff format --check`, `pytest`, сборка Docker‑образа.
 
 ## 10. Структура проекта
 
@@ -236,6 +237,5 @@ otus-rag/
 ├── sample_docs/
 ├── Dockerfile · docker-compose.yml · .env.example
 ├── .vscode/mcp.json
-├── .github/workflows/ci.yml
 └── README.md · ARCHITECTURE.md · REPORT.md
 ```

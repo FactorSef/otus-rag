@@ -1,0 +1,67 @@
+# RAG Knowledge Base — MCP server.
+#
+#   docker compose up --build                     # server only; LLM is external (see .env.example)
+#   LLM_BASE_URL=http://ollama:11434 \
+#     docker compose --profile local-llm up --build   # + bundled Ollama with the model pulled
+#
+# The MCP endpoint is http://localhost:8000/mcp (see .vscode/mcp.json).
+
+name: rag-kb
+
+services:
+  rag-server:
+    build:
+      context: .
+      args:
+        PRELOAD_EMBEDDINGS: ${PRELOAD_EMBEDDINGS:-1}
+        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
+    image: rag-kb:latest
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Container-specific values; everything else comes from .env or the defaults.
+      SERVER_PORT: "8000"
+      CHROMA_PATH: /data/chroma
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ./sample_docs:/app/sample_docs:ro  # demo knowledge base: index_folder("./sample_docs")
+      - ${DOCS_DIR:-./sample_docs}:/app/docs:ro  # your own documents: index_folder("./docs")
+      - rag-data:/data  # Chroma index + index state, survives restarts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # reach Ollama / LM Studio on the host (Linux)
+    depends_on:
+      ollama-init:  # only with --profile local-llm: wait until the model is pulled
+        condition: service_completed_successfully
+        required: false
+    restart: unless-stopped
+
+  # ---- optional: local LLM (docker compose --profile local-llm up) -------------------------
+  ollama:
+    image: ollama/ollama:0.40.2
+    profiles: [local-llm]
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama:0.40.2
+    profiles: [local-llm]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${LLM_MODEL:-qwen2.5:3b}"]
+    restart: "no"
+
+volumes:
+  rag-data:
+  ollama-models:
