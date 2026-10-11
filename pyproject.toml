@@ -35,6 +35,8 @@ packages = ["src/rag_kb"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# Demo documents are data (third-party code included verbatim), not project code.
+extend-exclude = ["sample_docs", "raw"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
