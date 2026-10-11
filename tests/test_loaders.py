@@ -40,3 +40,12 @@ def test_source_id_relative_to_base(tmp_path: Path):
     assert source_id(path, base=tmp_path) == "docs/a.md"
     other = Path(tmp_path.anchor) / "elsewhere" / "b.md"
     assert source_id(other, base=tmp_path) == other.resolve().as_posix()
+
+
+def test_binary_without_nul_bytes_is_rejected(tmp_path: Path):
+    blob = tmp_path / "blob.md"
+    blob.write_bytes(bytes(range(1, 32)) * 50)  # decodes as cp1251, but is not text
+    assert read_text(blob) is None
+    text = tmp_path / "ok.md"
+    text.write_text("Обычный текст" + chr(10) + chr(9) + "с табуляцией", encoding="cp1251")
+    assert read_text(text) is not None

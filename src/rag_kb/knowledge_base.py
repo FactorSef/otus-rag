@@ -49,6 +49,7 @@ class KnowledgeBase:
         )
         self.jobs = JobRunner()
         self._bm25 = BM25Index([])
+        self._bm25_generation = -1
         self.search_engine = HybridSearch(
             store=self.store,
             embeddings=self.embeddings,
@@ -61,7 +62,9 @@ class KnowledgeBase:
         self._rebuild_bm25()
 
     def _rebuild_bm25(self) -> None:
+        generation = self.store.generation
         self._bm25 = BM25Index(self.store.all_documents())  # atomic swap
+        self._bm25_generation = generation
         logger.info("BM25 index: %d chunks", len(self._bm25))
 
     @property
@@ -95,6 +98,16 @@ class KnowledgeBase:
                     "The knowledge base is still being indexed; check index_status."
                 )
             raise EmptyIndexError("The knowledge base is empty: call index_folder first.")
+        stored = self.store.load_state().get("embedding_id")
+        if stored and stored != self.embedding_id:
+            # Query vectors of the configured model are not comparable with the index.
+            raise EmptyIndexError(
+                f"The index was built with '{stored}' but the server uses "
+                f"'{self.embedding_id}': call index_folder to rebuild it."
+            )
+        if self._bm25_generation != self.store.generation:
+            # The collection was reset by a running rebuild: drop BM25 hits of wiped chunks.
+            self._rebuild_bm25()
         return self.search_engine.search(query, k)
 
     def status(self) -> dict[str, Any]:

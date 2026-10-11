@@ -104,3 +104,44 @@ def test_embedding_model_change_rebuilds_index(settings, docs_dir: Path):
     assert report.index_reset is True
     assert report.files_indexed == 7
     assert "warning" not in kb2.status()
+
+
+@pytest.mark.parametrize("pattern", ["../**/*.md", "/etc/*", "sub/../../*"])
+def test_glob_must_stay_inside_folder(kb: KnowledgeBase, docs_dir: Path, pattern: str):
+    with pytest.raises(IndexingError, match="Invalid glob"):
+        kb.index_folder(docs_dir, pattern)
+
+
+def test_chunk_settings_change_rechunks_unchanged_files(settings, docs_dir: Path):
+    KnowledgeBase(settings, embeddings=HashEmbeddings()).index_folder(docs_dir)
+    smaller = settings.model_copy(update={"chunk_size": 200, "chunk_overlap": 20})
+    kb2 = KnowledgeBase(smaller, embeddings=HashEmbeddings())
+    report = kb2.index_folder(docs_dir)
+    assert report.files_indexed == 7  # content unchanged, chunking changed
+    assert all(len(d.page_content) <= 200 for d in kb2.store.all_documents())
+    assert kb2.index_folder(docs_dir).files_indexed == 0  # and then it settles
+
+
+def test_file_without_chunks_is_not_reprocessed(kb: KnowledgeBase, docs_dir: Path):
+    (docs_dir / "empty.json").write_text("{}", encoding="utf-8")
+    kb.index_folder(docs_dir)
+    again = kb.index_folder(docs_dir)
+    assert again.files_indexed == 0
+    assert again.files_unchanged == 8
+
+
+def test_search_refuses_index_of_another_model(settings, docs_dir: Path):
+    KnowledgeBase(settings, embeddings=HashEmbeddings()).index_folder(docs_dir)
+    other = settings.model_copy(update={"embedding_model": "other-model"})
+    with pytest.raises(EmptyIndexError, match="rebuild"):
+        KnowledgeBase(other, embeddings=HashEmbeddings()).search("Сойка", 3)
+
+
+def test_bm25_follows_collection_reset(settings, docs_dir: Path):
+    kb = KnowledgeBase(settings, embeddings=HashEmbeddings())
+    kb.index_folder(docs_dir)
+    kb.store.reset()  # what a running rebuild does when the embedding model changes
+    kb.store.upsert([kb._bm25.docs[0]], [HashEmbeddings().embed_query("x")])
+    kb.store.save_state({"embedding_id": kb.embedding_id})
+    sources = {h.doc.id for h in kb.search("PURGE_LINE_LENGTH_MM Сойка", 10)}
+    assert sources == {kb._bm25.docs[0].id}  # no hits from wiped chunks

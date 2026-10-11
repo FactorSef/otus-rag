@@ -46,10 +46,19 @@ def read_text(path: Path) -> str | None:
         return None
     for encoding in ENCODINGS:
         try:
-            return raw.decode(encoding)
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
             continue
+        # cp1251 decodes almost any byte sequence: reject results full of control chars.
+        return None if _looks_binary(text) else text
     return None
+
+
+def _looks_binary(text: str, threshold: float = 0.01) -> bool:
+    sample = text[:8192]
+    allowed = {9, 10, 12, 13}  # tab, newline, form feed, carriage return
+    controls = sum(1 for ch in sample if ord(ch) < 32 and ord(ch) not in allowed)
+    return bool(sample) and controls / len(sample) > threshold
 
 
 def _normalize_extensions(extensions: Iterable[str]) -> set[str]:

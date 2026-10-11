@@ -14,6 +14,7 @@ from langchain_core.embeddings import Embeddings
 
 from rag_kb.indexing.chunkers import Chunker, search_text
 from rag_kb.indexing.loaders import scan_folder, source_id
+from rag_kb.retrieval.embeddings import batched
 from rag_kb.retrieval.store import ChromaStore
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ class IndexPlan:
     report: IndexReport
     previous_roots: list[str]
     changed: list[str] = field(default_factory=list)  # sources to (re-)embed
+    empty: dict[str, str] = field(default_factory=dict)  # files without chunks: {source: hash}
+    previous_empty: dict[str, str] = field(default_factory=dict)
+    rechunk: bool = False  # chunking settings changed: every file is re-chunked
     stale: list[str] = field(default_factory=list)  # sources gone from disk
     chunks: list[Document] = field(default_factory=list)
 
@@ -88,6 +92,7 @@ class Indexer:
         if not root.is_dir():
             raise IndexingError(f"Not a folder: {root}")
         root = root.resolve()
+        _check_pattern(pattern)
 
         scan = scan_folder(root, pattern, self.extensions, self.max_file_size_kb)
         if not scan.files:
@@ -97,27 +102,47 @@ class Indexer:
             )
 
         state = self.store.load_state()
-        reset = self.store.count() > 0 and state.get("embedding_id") != self.embedding_id
+        has_data = self.store.count() > 0
+        reset = has_data and state.get("embedding_id") != self.embedding_id
         indexed = {} if reset else self.store.source_hashes()
+        # Chunk size, overlap or splitting code changed: re-chunk every file (no reset
+        # needed, the vectors stay comparable).
+        rechunk = has_data and state.get("chunking_id") != self.chunker.config_id
+        skip_if = {} if rechunk else indexed
+        previous_empty = {} if reset or rechunk else state.get("empty_files", {})
 
         report = IndexReport(root=source_id(root), pattern=pattern, index_reset=reset)
         report.skipped_count = len(scan.skipped)
         report.skipped = [f"{p}: {why}" for p, why in scan.skipped[:MAX_REPORTED_SKIPS]]
 
-        plan = IndexPlan(root=root, report=report, previous_roots=state.get("roots", []))
+        plan = IndexPlan(
+            root=root,
+            report=report,
+            previous_roots=state.get("roots", []),
+            previous_empty=previous_empty,
+            rechunk=rechunk,
+        )
         for file in scan.files:
             digest = hashlib.sha1(file.text.encode()).hexdigest()
-            if indexed.get(file.source) == digest:
+            if digest in (skip_if.get(file.source), previous_empty.get(file.source)):
                 report.files_unchanged += 1
                 continue
             file_chunks = self.chunker.split(file)
+            if not file_chunks:
+                # Nothing to store in Chroma; remember the hash so that the file counts
+                # as unchanged next time instead of being re-processed on every run.
+                plan.empty[file.source] = digest
+                if file.source in indexed:
+                    plan.stale.append(file.source)  # drop its old chunks
+                continue
             for chunk in file_chunks:
                 chunk.metadata["file_hash"] = digest
                 chunk.metadata["file_chunks"] = len(file_chunks)
             plan.changed.append(file.source)
             plan.chunks.extend(file_chunks)
             report.by_type[file.file_type] = report.by_type.get(file.file_type, 0) + 1
-        plan.stale = [] if reset else self._stale_sources(root, indexed)
+        if not reset:
+            plan.stale.extend(self._stale_sources(root, indexed))
         return plan
 
     def apply(self, plan: IndexPlan, progress: ProgressCallback | None = None) -> IndexReport:
@@ -132,7 +157,12 @@ class Indexer:
         report.files_removed = len(plan.stale)
         # Record the vector space before writing vectors: if this run is interrupted,
         # the next one must keep (not wipe) the chunks already written.
-        self.store.save_state({**self.store.load_state(), "embedding_id": self.embedding_id})
+        early = {**self.store.load_state(), "embedding_id": self.embedding_id}
+        if not plan.rechunk:
+            # Interrupted ordinary run: files written so far are final and are skipped next
+            # time. An interrupted re-chunk keeps the old chunking id so it is redone fully.
+            early["chunking_id"] = self.chunker.config_id
+        self.store.save_state(early)
 
         self._embed_and_store(plan.chunks, progress)
         report.files_indexed = len(plan.changed)
@@ -144,9 +174,17 @@ class Indexer:
         report.duration_s = round(time.perf_counter() - started, 2)
 
         previous_roots = [] if report.index_reset else plan.previous_roots
+        rewritten = {*plan.changed, *plan.stale}
+        empty_files = {
+            source: digest
+            for source, digest in plan.previous_empty.items()
+            if source not in rewritten and _source_path(source).exists()
+        } | plan.empty
         self.store.save_state(
             {
                 "embedding_id": self.embedding_id,
+                "chunking_id": self.chunker.config_id,
+                "empty_files": empty_files,
                 "last_indexed_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "roots": sorted({*previous_roots, report.root}),
                 "files_by_type": dict(Counter(s.rsplit(".", 1)[-1] for s in hashes)),
@@ -177,17 +215,30 @@ class Indexer:
         for source in indexed:
             if not source.startswith(prefix) or (not prefix and Path(source).is_absolute()):
                 continue
-            path = Path(source) if Path(source).is_absolute() else Path.cwd() / source
-            if not path.exists():
+            if not _source_path(source).exists():
                 stale.append(source)
         return stale
 
     def _embed_and_store(self, chunks: list[Document], progress: ProgressCallback | None) -> None:
-        total = len(chunks)
-        for start in range(0, total, self.batch_size):
-            batch = chunks[start : start + self.batch_size]
+        total, done = len(chunks), 0
+        for batch in batched(chunks, self.batch_size):
             vectors = self.embeddings.embed_documents([search_text(d) for d in batch])
             self.store.upsert(batch, vectors)
-            done = start + len(batch)
+            done += len(batch)
             if progress:
                 progress(done, total, f"Embedded {done}/{total} chunks")
+
+
+def _source_path(source: str) -> Path:
+    path = Path(source)
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _check_pattern(pattern: str) -> None:
+    """The glob must stay inside the indexed folder."""
+    parts = Path(pattern).parts
+    if Path(pattern).is_absolute() or pattern.startswith(("/", "\\")) or ".." in parts:
+        raise IndexingError(
+            f"Invalid glob '{pattern}': use a pattern relative to the folder without '..', "
+            "e.g. '**/*' or 'docs/**/*.md'"
+        )

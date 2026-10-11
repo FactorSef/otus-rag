@@ -26,6 +26,8 @@ from langchain_text_splitters import Language, RecursiveCharacterTextSplitter, R
 
 from rag_kb.indexing.loaders import SourceFile
 
+# Bump when the splitting logic changes, so existing indexes get re-chunked.
+CHUNKER_VERSION = "2"
 CODE_LANGUAGES = {"py": Language.PYTHON, "js": Language.JS, "ts": Language.TS}
 HEADING_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*#*\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
@@ -87,6 +89,11 @@ class Chunker:
         }
 
     @property
+    def config_id(self) -> str:
+        """Identifies the chunking: when it changes, unchanged files must be re-chunked."""
+        return f"{CHUNKER_VERSION}:{self.chunk_size}:{self.chunk_overlap}"
+
+    @property
     def supported_types(self) -> set[str]:
         return set(self._strategies)
 
@@ -96,9 +103,15 @@ class Chunker:
         line_starts = _line_starts(file.text)
         docs = []
         for index, piece in enumerate(pieces):
-            start_line = _line_of(line_starts, piece.start)
-            end = piece.end if piece.end is not None else piece.start + len(piece.text)
-            end_line = _line_of(line_starts, max(end - 1, piece.start))
+            if piece.end is None:
+                # page_content is stripped: point the line range at the text itself,
+                # not at leading/trailing blank lines of the piece.
+                start = piece.start + len(piece.text) - len(piece.text.lstrip())
+                end = piece.start + len(piece.text.rstrip())
+            else:  # re-serialized JSON: the span in the file is given explicitly
+                start, end = piece.start, piece.end
+            start_line = _line_of(line_starts, start)
+            end_line = _line_of(line_starts, max(end - 1, start))
             docs.append(
                 Document(
                     id=chunk_id(file.source, index),
@@ -182,7 +195,9 @@ class Chunker:
         splitter = RecursiveJsonSplitter(max_chunk_size=self.chunk_size)
         parts = splitter.split_json(data, convert_lists=True)
         line_starts = _line_starts(text)
-        lines = text.splitlines()
+        # Split on newline only, exactly like _line_starts: str.splitlines() also breaks
+        # on CR, NEL, U+2028... and would make line indices disagree with line_starts.
+        lines = text.split("\n")
 
         located = []
         cursor_line = 0

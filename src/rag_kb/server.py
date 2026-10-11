@@ -51,17 +51,18 @@ def create_server(
     kb = kb or KnowledgeBase(settings)
     llm_check = llm_check or (lambda: ensure_llm(settings))
     llm_status = llm_status or (lambda: check_llm(settings, timeout=2.0))
-    lazy_models: dict[str, ChatModels] = {}
+    compiled: dict[str, Any] = {}
 
     def get_graph():
-        if "m" not in lazy_models:
-            lazy_models["m"] = models or create_chat_models(settings)
-        m = lazy_models["m"]
+        """Build the graph on first use (the LLM client is created lazily too)."""
+        if "graph" not in compiled:
+            m = models or create_chat_models(settings)
 
-        def search(query: str, k: int):
-            return [hit.doc for hit in kb.search(query, k)]
+            def search(query: str, k: int):
+                return [hit.doc for hit in kb.search(query, k)]
 
-        return build_graph(m.chat, search, settings, json_llm=m.json)
+            compiled["graph"] = build_graph(m.chat, search, settings, json_llm=m.json)
+        return compiled["graph"]
 
     topic = settings.kb_topic
     mcp = FastMCP("rag-knowledge-base", instructions=_instructions(topic))
@@ -94,7 +95,8 @@ def create_server(
         ] = "**/*",
     ) -> dict[str, Any]:
         try:
-            job = kb.start_indexing(path, glob)
+            # Planning scans and chunks files: keep it off the event loop.
+            job = await asyncio.to_thread(kb.start_indexing, path, glob)
         except (IndexingError, IndexingInProgressError) as exc:
             raise ToolError(str(exc)) from exc
         finished = await asyncio.to_thread(job.wait, settings.index_wait_s)

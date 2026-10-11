@@ -183,3 +183,23 @@ def test_thinking_blocks_and_prompt_suffix(settings):
     assert result["answer"] == "Ответ: 97.3 [1]"
     assert len(result["relevant"]) == 2
     assert search.queries == [QUESTION, "Сойка", "Soyka"]
+
+
+def test_broaden_remembers_all_tried_queries_and_digs_deeper(settings):
+    # Broaden always proposes the original rewrite queries: nothing new to try.
+    llm = llm_for(set(), broaden='{"queries": ["Сойка e-steps", "Soyka e-steps"]}')
+    ranked = [*RELEVANT, *NOISE, *HIDDEN]
+    calls = []
+
+    def search(query, k):
+        calls.append(k)
+        return ranked[:k]
+
+    result = run(llm, search, settings)
+    # Second broaden saw the rewrite queries as tried and did not repeat them.
+    broadens = [s for s in result["steps"] if s.startswith("broaden")]
+    assert all("Soyka e-steps" not in s for s in broadens)
+    # Each retry searched deeper than the chunks already graded, so it found new ones.
+    assert max(calls) > settings.retrieve_k
+    graded = [s for s in result["steps"] if s.startswith("grade")]
+    assert graded[1] != "grade: 0/0 relevant (total 0)"

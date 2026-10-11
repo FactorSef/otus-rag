@@ -67,10 +67,15 @@ def question_language(question: str) -> str:
     return "Russian" if cyr >= lat and cyr > 0 else "English"
 
 
+def query_key(query: str) -> str:
+    """Comparison key for queries: case and punctuation do not make a query new."""
+    return " ".join(re.findall(r"\w+", query.lower()))
+
+
 def unique(items: list[str]) -> list[str]:
     seen, out = set(), []
     for item in items:
-        key = " ".join(re.findall(r"\w+", item.lower()))  # ignore case and punctuation
+        key = query_key(item)
         if key and key not in seen:
             seen.add(key)
             out.append(item.strip())
@@ -114,6 +119,7 @@ class Nodes:
         queries = unique([question, *rewritten])
         return {
             "queries": queries,
+            "tried": queries,
             "retries": 0,
             "relevant": [],
             "seen_ids": [],
@@ -123,10 +129,12 @@ class Nodes:
     def retrieve(self, state: RAGState) -> dict:
         """Hybrid search for every query; lists are fused by reciprocal rank."""
         seen = set(state.get("seen_ids", []))
+        # Already graded chunks are skipped, so look deeper to still get retrieve_k new ones.
+        depth = self.s.retrieve_k + len(seen)
         scores: dict[str, float] = {}
         docs: dict[str, Document] = {}
         for query in state["queries"]:
-            for rank, doc in enumerate(self.search(query, self.s.retrieve_k), 1):
+            for rank, doc in enumerate(self.search(query, depth), 1):
                 if doc.id in seen:
                     continue
                 docs[doc.id] = doc
@@ -165,7 +173,7 @@ class Nodes:
         }
 
     def broaden(self, state: RAGState) -> dict:
-        tried = state.get("queries", [])
+        tried = state.get("tried", state.get("queries", []))
         reply = self._ask(
             self.json_llm,
             prompts.BROADEN_SYSTEM,
@@ -173,13 +181,20 @@ class Nodes:
         )
         data = parse_json(reply) or {}
         proposed = data.get("queries") if isinstance(data.get("queries"), list) else []
-        tried_keys = {q.strip().lower() for q in tried}
-        queries = [q for q in unique([str(q) for q in proposed]) if q.lower() not in tried_keys]
-        if not queries:  # model gave nothing usable: fall back to the bare question terms
+        tried_keys = {query_key(q) for q in tried}
+        queries = [q for q in unique([str(q) for q in proposed]) if query_key(q) not in tried_keys]
+        if not queries:
+            # Nothing new from the model: search the question again. retrieve skips the
+            # chunks graded so far and goes deeper, so this still brings new material.
             queries = [state["question"]]
         queries = queries[:MAX_BROADEN_QUERIES]
         retries = state.get("retries", 0) + 1
-        return {"queries": queries, "retries": retries, "steps": [f"broaden #{retries}: {queries}"]}
+        return {
+            "queries": queries,
+            "tried": unique([*tried, *queries]),
+            "retries": retries,
+            "steps": [f"broaden #{retries}: {queries}"],
+        }
 
     def generate(self, state: RAGState) -> dict:
         question = state["question"]

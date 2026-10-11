@@ -106,3 +106,21 @@ def test_invalid_json_falls_back_to_text(chunker):
     docs = chunker.split(make_file("broken.json", '{"a": 1,, oops'))
     assert len(docs) == 1
     assert docs[0].metadata["section"] == ""
+
+
+def test_json_with_unicode_line_separators(chunker):
+    sep = chr(0x2028)  # valid inside JSON strings; str.splitlines() treats it as a line break
+    big = {f"item{i}": {"name": f"line{sep}break {i}", "temp": 200 + i} for i in range(20)}
+    text = json.dumps(big, ensure_ascii=False, indent=2)
+    lines = text.split(chr(10))
+    docs = chunker.split(make_file("sep.json", text))
+    assert len(docs) > 1
+    for doc in docs:
+        key = doc.metadata["section"].split(".")[-1]  # deepest key of the chunk path
+        assert f'"{key}"' in lines[doc.metadata["start_line"] - 1]  # cites the right line
+
+
+def test_line_range_skips_leading_blank_lines(chunker):
+    text = chr(10) * 3 + "First paragraph." + chr(10)
+    doc = chunker.split(make_file("blank.md", text))[0]
+    assert doc.metadata["start_line"] == doc.metadata["end_line"] == 4

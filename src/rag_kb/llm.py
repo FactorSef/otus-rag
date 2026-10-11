@@ -75,7 +75,7 @@ def check_llm(settings: Settings, timeout: float = 5.0) -> dict:
             names = {m["id"] for m in resp.json().get("data", [])}
             available = _model_listed(settings.llm_model, names)
             hint = "load the model on the server or fix LLM_MODEL"
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
+    except Exception as exc:  # any malformed reply means "not usable", never a crash
         return {**info, "reachable": False, "error": f"{type(exc).__name__}: {exc}"}
 
     info.update(reachable=True, model_available=available)

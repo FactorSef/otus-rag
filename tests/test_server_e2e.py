@@ -140,3 +140,27 @@ async def test_health_endpoint(server):
         resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "chunks": 0}
+
+
+async def test_invalid_glob_is_a_tool_error(server, docs_dir: Path):
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="Invalid glob"):
+            await client.call_tool("index_folder", {"path": str(docs_dir), "glob": "../*"})
+
+
+def test_check_llm_never_raises_on_odd_replies(settings, monkeypatch):
+    import httpx
+
+    from rag_kb.llm import check_llm
+
+    class Odd:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return ["not", "an", "object"]
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: Odd())
+    status = check_llm(settings)
+    assert status["reachable"] is False
+    assert "AttributeError" in status["error"]
