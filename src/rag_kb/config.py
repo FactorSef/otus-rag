@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     retrieve_k: int = Field(6, ge=1, le=50)
     max_top_k: int = Field(50, ge=1)
+    fetch_k: int = Field(50, ge=1)  # depth of each list (BM25, vector) before fusion
     bm25_weight: float = Field(0.5, ge=0.0)
     vector_weight: float = Field(0.5, ge=0.0)
     rrf_c: int = Field(60, ge=1)
@@ -77,6 +78,8 @@ class Settings(BaseSettings):
             raise ValueError("BM25_WEIGHT and VECTOR_WEIGHT cannot both be 0")
         if self.retrieve_k > self.max_top_k:
             raise ValueError("RETRIEVE_K cannot exceed MAX_TOP_K")
+        if self.fetch_k < self.max_top_k:
+            raise ValueError("FETCH_K must be at least MAX_TOP_K")
         return self
 
     @property
