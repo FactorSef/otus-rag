@@ -7,7 +7,7 @@ import pytest
 
 from helpers import HashEmbeddings
 from rag_kb.indexing.jobs import IndexingInProgressError
-from rag_kb.knowledge_base import KnowledgeBase
+from rag_kb.knowledge_base import EmptyIndexError, KnowledgeBase
 
 TIMEOUT = 10
 
@@ -98,3 +98,14 @@ def test_failed_job_is_reported_and_next_run_recovers(small_batches, docs_dir: P
     assert kb.store.count() == report.total_chunks
     ids = [d.id for d in kb.store.all_documents()]
     assert len(ids) == len(set(ids))
+
+
+def test_search_during_first_indexing_reports_progress(small_batches, docs_dir: Path):
+    emb = GatedEmbeddings()
+    kb = KnowledgeBase(small_batches, embeddings=emb)
+    job = kb.start_indexing(docs_dir)
+    with pytest.raises(EmptyIndexError, match=r"still being indexed .*0/\d+ chunks, 0%"):
+        kb.search("Сойка", 3)
+    emb.release(100)
+    assert job.wait(TIMEOUT)
+    assert kb.search("Сойка", 3)

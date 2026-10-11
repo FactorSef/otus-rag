@@ -134,11 +134,7 @@ def create_server(
         if not question:
             raise ToolError("question must not be empty")
         if kb.is_empty:
-            raise ToolError(
-                "The knowledge base is empty"
-                + (" (indexing in progress, see index_status)." if kb.jobs.busy else ": ")
-                + ("" if kb.jobs.busy else "call index_folder('./sample_docs') first.")
-            )
+            raise ToolError(kb.empty_message())
         try:
             await asyncio.to_thread(llm_check)
             graph = get_graph()

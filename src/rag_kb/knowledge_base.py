@@ -91,13 +91,22 @@ class KnowledgeBase:
             raise IndexingFailedError(job.error or "indexing failed")
         return job.report
 
+    def empty_message(self) -> str:
+        """Why nothing can be searched yet, phrased for the host agent to relay."""
+        job = self.jobs.current
+        if job is not None and job.state == "running":
+            percent = 100 * job.chunks_done / job.chunks_total if job.chunks_total else 0
+            eta = f", about {round(job.eta_s / 60)} min left" if job.eta_s else ""
+            return (
+                f"The knowledge base is still being indexed in the background "
+                f"({job.chunks_done}/{job.chunks_total} chunks, {percent:.0f}%{eta}). "
+                "Try again when index_status shows state 'completed'."
+            )
+        return "The knowledge base is empty: call index_folder('./sample_docs') first."
+
     def search(self, query: str, k: int) -> list[SearchHit]:
         if self.is_empty:
-            if self.jobs.busy:
-                raise EmptyIndexError(
-                    "The knowledge base is still being indexed; check index_status."
-                )
-            raise EmptyIndexError("The knowledge base is empty: call index_folder first.")
+            raise EmptyIndexError(self.empty_message())
         stored = self.store.load_state().get("embedding_id")
         if stored and stored != self.embedding_id:
             # Query vectors of the configured model are not comparable with the index.
