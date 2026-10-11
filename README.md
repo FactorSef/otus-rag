@@ -123,6 +123,8 @@ uv run ruff check . && uv run ruff format --check .
 uv run rag-kb              # сервер на http://localhost:8000/mcp
 ```
 
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) на каждый push в `main` и pull request запускает те же `ruff` и `pytest`, затем собирает Docker‑образ и проверяет `/health` запущенного контейнера.
+
 При локальном запуске с включённым системным прокси или VPN задайте `NO_PROXY=localhost,127.0.0.1`: иначе запросы Python‑клиентов к localhost могут уйти в прокси.
 
 ## Лицензии демо‑документов

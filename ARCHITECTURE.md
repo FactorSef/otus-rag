@@ -70,6 +70,11 @@ MCP‑сервер, превращающий папку с документам�
 
 Сервер стартует, даже если LLM недоступна: проверка выполняется при старте (предупреждение в логе), в `index_status` и при вызове `ask_question` (понятная ошибка с адресом и именем модели).
 
+**CI** (`.github/workflows/ci.yml`, GitHub Actions, на push в `main` и на pull request):
+
+1. `lint-test` — `uv sync --frozen`, `ruff check`, `ruff format --check`, `pytest` (без сети и моделей: заглушки эмбеддингов и LLM).
+2. `docker` — после успешных тестов: сборка образа с `PRELOAD_EMBEDDINGS=0` (модель на 2 ГБ в CI не нужна), запуск контейнера и smoke‑тест `GET /health`.
+
 ## 3. Конфигурация
 
 | Переменная | По умолчанию | Назначение |
@@ -245,5 +250,6 @@ otus-rag/
 ├── sample_docs/
 ├── Dockerfile · docker-compose.yml · .env.example
 ├── .vscode/mcp.json
+├── .github/workflows/ci.yml
 └── README.md · ARCHITECTURE.md · REPORT.md
 ```
