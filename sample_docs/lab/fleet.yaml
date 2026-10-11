@@ -1,0 +1,147 @@
+# Rusty Goose lab — printer fleet register
+# Maintained by Varvara Tikhomirova. Units: mm, °C, hours of printing.
+# Every printer has a name; the name is used in the print log, incidents and the job queue.
+
+soyka:
+  display_name: "Сойка"
+  model: Anet A8 (heavily modified)
+  in_service_since: 2019-02-03
+  room: B-14
+  firmware: Marlin 2.1.2
+  kinematics: cartesian
+  build_volume: [220, 220, 240]
+  nozzle:
+    diameter: 0.4
+    material: brass
+  extruder:
+    type: MK8 direct drive
+    e_steps_per_mm: 97.3        # calibrated 2025-06-14 with tools/esteps_calc.py
+  bed:
+    heater: stock MK3 clone via MOSFET
+    wires: AWG 14 silicone
+    insulation: 6 mm cork + aluminium foil
+    max_temp: 105
+  allowed_materials: [PLA]
+  night_unattended: false       # never prints unattended at night (night shift policy rev. 4)
+  maintenance:
+    nozzle_swap_hours: 312
+    belt_check_hours: 90
+  notes: >
+    The first printer of the lab, bought by Gleb Sorokin before the lab existed.
+    Named "Soyka" (jay) because it rattled as loudly as one.
+
+kedr:
+  display_name: "Кедр"
+  model: Voron 2.4 350
+  in_service_since: 2021-05-20
+  room: B-14
+  firmware: Klipper
+  kinematics: corexy
+  build_volume: [350, 350, 330]
+  enclosed: true
+  chamber_filter: HEPA + activated carbon
+  nozzle:
+    diameter: 0.4
+    material: hardened steel
+  extruder:
+    type: Clockwork 2
+    rotation_distance: 22.6789
+    gear_ratio: "50:10"
+    pressure_advance:
+      abs_grafit: 0.042
+      asa_white: 0.046
+  hotend:
+    thermistor_clamp: printed polycarbonate (added after 2025-03-17 incident)
+    verify_heater:
+      max_error: 120
+      check_gain_time: 20
+  allowed_materials: [ABS, ASA, PETG, PLA]
+  night_unattended: true
+  maintenance:
+    nozzle_swap_hours: 312
+    belt_check_hours: 90
+    rail_lube_hours: 500
+
+pustelga:
+  display_name: "Пустельга"
+  model: Bambu Lab P1P
+  in_service_since: 2023-04-11
+  room: B-14
+  firmware: stock (Bambu)
+  kinematics: corexy
+  build_volume: [256, 256, 256]
+  ams: true
+  ams_slots: 4
+  nozzle:
+    diameter: 0.4
+    material: stainless steel
+  allowed_materials: [PLA, PETG]
+  night_unattended: true
+  maintenance:
+    nozzle_swap_hours: 312
+    belt_check_hours: 90
+  notes: >
+    AMS stays in room B-14 next to the printer: its cable is only 1.5 m long,
+    so it cannot be moved into the dry room B-16.
+
+zholud:
+  display_name: "Жёлудь"
+  model: Creality Ender-3 S1
+  in_service_since: 2022-09-01
+  room: B-14
+  firmware: Klipper
+  kinematics: cartesian
+  build_volume: [220, 220, 270]
+  nozzle:
+    diameter: 0.6
+    material: brass
+  extruder:
+    type: Sprite direct drive
+    rotation_distance: 7.71
+    retract_length: 0.8          # TPU: keep retraction short
+    retract_speed: 25
+  allowed_materials: [TPU]
+  night_unattended: true
+  maintenance:
+    nozzle_swap_hours: 312
+    belt_check_hours: 90
+    hours_since_nozzle_swap: 298  # as of 2025-09-29; swap scheduled for 2025-10-01
+
+klyukva:
+  display_name: "Клюква"
+  model: Snapmaker U1
+  in_service_since: 2025-06-02
+  room: B-14
+  firmware: stock (Klipper-based)
+  kinematics: corexy
+  build_volume: [270, 270, 270]
+  toolheads: 4
+  material_switching_retraction: 3   # default 10 mm causes TPU jams on tool swap
+  nozzle:
+    diameter: 0.4
+    material: stainless steel
+  allowed_materials: [PLA, PETG, TPU, PVA]
+  night_unattended: true
+  maintenance:
+    nozzle_swap_hours: 312
+    belt_check_hours: 90
+    toolhead_offset_calibration: after every nozzle change
+
+mamont:
+  display_name: "Мамонт"
+  model: Tronxy X5S
+  in_service_since: 2022-03-15
+  room: B-14
+  firmware: Marlin 2.1
+  kinematics: corexy
+  build_volume: [330, 330, 400]
+  z_endstop: optical, normally-closed   # replaced after 2025-08-02 Z crash
+  nozzle:
+    diameter: 0.6
+    material: hardened steel
+  allowed_materials: [PETG]
+  night_unattended: true
+  longest_print: "71 h 12 min (bell tower model for the local history museum)"
+  maintenance:
+    nozzle_swap_hours: 312
+    belt_check_hours: 75          # reduced from 90 at the 2025-09-29 planning meeting

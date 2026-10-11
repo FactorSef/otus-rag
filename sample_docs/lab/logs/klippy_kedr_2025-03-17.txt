@@ -1,0 +1,29 @@
+Excerpt from klippy.log of printer "Kedr" (Voron 2.4 350), night of 2025-03-17.
+Saved by Varvara Tikhomirova for the "blue cloud" incident report. Timestamps are local time.
+Configuration at that moment: [verify_heater extruder] max_error: 240, check_gain_time: 60
+(both later reverted to defaults 120 / 20).
+
+03:05:41 Stats 11402.1: gcodein=0 mcu: mcu_awake=0.031 ... extruder: target=255 temp=255.2 pwm=0.412
+03:08:41 Stats 11582.1: ... extruder: target=255 temp=254.9 pwm=0.418
+03:11:41 Stats 11762.1: ... extruder: target=255 temp=255.1 pwm=0.409
+03:12:09 Stats 11790.1: ... extruder: target=255 temp=248.3 pwm=0.522
+03:12:39 Stats 11820.1: ... extruder: target=255 temp=231.7 pwm=0.871
+03:13:09 Stats 11850.1: ... extruder: target=255 temp=214.0 pwm=1.000
+03:14:09 Stats 11910.1: ... extruder: target=255 temp=198.6 pwm=1.000
+03:16:09 Stats 12030.1: ... extruder: target=255 temp=187.2 pwm=1.000
+03:18:09 Stats 12150.1: ... extruder: target=255 temp=181.9 pwm=1.000
+03:19:02 Heater extruder not heating at expected rate
+03:19:02 Transition to shutdown state: Heater extruder not heating at expected rate
+03:19:02 Dumping gcode input 0 blocks
+03:19:02 MCU 'mcu' shutdown: Heater extruder not heating at expected rate
+Once the underlying issue is corrected, use the
+"FIRMWARE_RESTART" command to reset the firmware, reload the
+config, and restart the host software.
+Printer is shutdown
+03:24:37 webhooks client 140213: night operator opened camera stream
+03:24:58 smart socket "kedr-power": OFF (operator T. Lastochkin)
+
+Note (V.T.): the reported temperature FELL while pwm was at 100% because the thermistor had
+slid out of the heater block and was measuring air. Estimated real block temperature: 287 C.
+With the default max_error 120 / check_gain_time 20 the shutdown would have happened at
+about 03:13:30 instead of 03:19:02.

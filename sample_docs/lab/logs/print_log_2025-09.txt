@@ -1,0 +1,27 @@
+RUSTY GOOSE LAB - PRINT LOG - SEPTEMBER 2025 (excerpt)
+Exported from the job queue. Times are local (Tomsk). Durations h:mm.
+Columns: job | date start | printer | material | grams | duration | result | operator | note
+------------------------------------------------------------------------------------------------
+#4318 | 2025-09-01 09:12 | pustelga | PLA white             |  64 | 2:41  | OK      | Gabdullin | keychains x20
+#4319 | 2025-09-01 09:30 | mamont   | Smoky Quartz PETG     | 412 | 11:05 | OK      | Gabdullin | lamp shade, day shift
+#4320 | 2025-09-01 13:02 | zholud   | TPU 95A Bolotny       |  38 | 3:10  | OK      | Gabdullin | phone bumper
+#4321 | 2025-09-01 21:40 | kedr     | ABS Grafit            | 188 | 7:55  | OK      | Lastochkin| NS-7 ok
+#4322 | 2025-09-02 08:55 | klyukva  | PLA + PVA             |  97 | 5:20  | OK      | Gabdullin | 2 colours + PVA supports
+#4335 | 2025-09-04 22:10 | kedr     | ASA white             | 240 | 9:31  | OK      | Lastochkin| weather station housing, NS-7 ok
+#4341 | 2025-09-06 10:00 | soyka    | PLA black             |  22 | 1:15  | OK      | Gabdullin | Goose Cube rejected? no - 23.71/23.66/23.73, pass
+#4352 | 2025-09-08 09:05 | ALL      | -                     |   - | -     | CALIB   | Tikhomirova | weekly Goose Cubes, all six printers pass
+#4367 | 2025-09-11 23:02 | kedr     | ABS Grafit            | 156 | 3:48  | FAILED  | Lastochkin| spaghetti at layer 212, part detached from bed; cancelled remotely 02:50
+#4368 | 2025-09-12 09:20 | kedr     | ABS Grafit            | 156 | 6:40  | OK      | Gabdullin | reprint of #4367, bed cleaned with IPA, brim 5 mm
+#4380 | 2025-09-14 21:15 | pustelga | PETG transparent blue | 133 | 6:02  | FAILED  | Lastochkin| filament runout AMS slot 3 at 04:41, spool weighed wrong at NS-7 item 3
+#4381 | 2025-09-15 09:00 | pustelga | PETG transparent blue | 133 | 6:02  | OK      | Gabdullin | reprint of #4380
+#4399 | 2025-09-18 10:30 | mamont   | PETG matte olive      | 870 | 19:44 | OK      | Gabdullin | split from 26 h job (night limit 9:40), part 1 of 2
+#4400 | 2025-09-19 10:15 | mamont   | PETG matte olive      | 655 | 14:58 | OK      | Gabdullin | part 2 of 2
+#4412 | 2025-09-21 22:30 | kedr     | ABS Grafit            | 205 | 8:12  | FAILED  | Lastochkin| spaghetti at layer 88, warped corner hit the nozzle; chamber was 38 C (< 45 C min)
+#4413 | 2025-09-22 09:40 | kedr     | ABS Grafit            | 205 | 8:20  | OK      | Gabdullin | reprint of #4412 with chamber preheat 20 min
+#4426 | 2025-09-24 12:00 | klyukva  | TPU + PLA             |  76 | 4:33  | OK      | Tikhomirova | material switching retraction 3 mm, no jams
+#4440 | 2025-09-26 21:05 | mamont   | Smoky Quartz PETG     | 590 | 9:38  | OK      | Lastochkin| 2 min below the 9:40 limit, dried 6 h at 61 C
+#4458 | 2025-09-28 11:10 | pustelga | Silk PLA copper       |  48 | 2:55  | OK      | Gabdullin | trophies x3
+#4471 | 2025-09-30 18:25 | klyukva  | PLA rusty orange      |  31 | 1:50  | OK      | Gabdullin | goose keychains for the lab's own stand
+------------------------------------------------------------------------------------------------
+SUMMARY September 2025: jobs #4318-#4471 (154 jobs), failed 3 (#4367, #4380, #4412), all reprinted.
+Material used: 41.7 kg total, of which Smoky Quartz PETG 9.4 kg.
