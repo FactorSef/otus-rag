@@ -17,8 +17,6 @@ htmlcov/
 data/
 .cache/
 
-# Source dump of 3dprint.wiki (images, pdf); indexed content lives in sample_docs/
-raw/
 
 # IDE / OS
 .idea/

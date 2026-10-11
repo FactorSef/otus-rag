@@ -6,7 +6,6 @@
 .ruff_cache
 **/__pycache__
 data
-raw
 sample_docs
 tests
 .env
