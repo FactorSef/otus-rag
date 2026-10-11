@@ -91,18 +91,35 @@ class KnowledgeBase:
             raise IndexingFailedError(job.error or "indexing failed")
         return job.report
 
+    def _job_progress(self) -> str | None:
+        """``"412/1112 chunks, 37%, about 7 min left"`` while indexing runs, else ``None``."""
+        job = self.jobs.current
+        if job is None or job.state != "running":
+            return None
+        percent = 100 * job.chunks_done / job.chunks_total if job.chunks_total else 0
+        eta = f", about {round(job.eta_s / 60)} min left" if job.eta_s else ""
+        return f"{job.chunks_done}/{job.chunks_total} chunks, {percent:.0f}%{eta}"
+
     def empty_message(self) -> str:
         """Why nothing can be searched yet, phrased for the host agent to relay."""
-        job = self.jobs.current
-        if job is not None and job.state == "running":
-            percent = 100 * job.chunks_done / job.chunks_total if job.chunks_total else 0
-            eta = f", about {round(job.eta_s / 60)} min left" if job.eta_s else ""
+        progress = self._job_progress()
+        if progress:
             return (
-                f"The knowledge base is still being indexed in the background "
-                f"({job.chunks_done}/{job.chunks_total} chunks, {percent:.0f}%{eta}). "
+                f"The knowledge base is still being indexed in the background ({progress}). "
                 "Try again when index_status shows state 'completed'."
             )
         return "The knowledge base is empty: call index_folder('./sample_docs') first."
+
+    def partial_index_warning(self) -> str | None:
+        """Warning for results served while indexing still runs (the index is incomplete)."""
+        progress = self._job_progress()
+        if not progress:
+            return None
+        return (
+            f"Indexing is still running ({progress}): results come from a partial index and "
+            "may be incomplete, including 'not found' answers. Tell the user and repeat the "
+            "request when index_status shows state 'completed'."
+        )
 
     def search(self, query: str, k: int) -> list[SearchHit]:
         if self.is_empty:

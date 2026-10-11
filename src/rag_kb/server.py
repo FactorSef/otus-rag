@@ -158,13 +158,14 @@ def create_server(
                 f"LLM: {settings.llm_provider} {settings.llm_model} at {settings.llm_base_url}"
             ) from exc
 
-        return {
+        result = {
             "answer": state.get("answer", ""),
             "sources": state.get("sources", []),
             "relevant_chunks": len(state.get("relevant", [])),
             "retries": state.get("retries", 0),
             "steps": steps,
         }
+        return _with_partial_warning(result, kb)
 
     @mcp.tool(
         description=(
@@ -190,7 +191,7 @@ def create_server(
             hits = await asyncio.to_thread(kb.search, query, top_k)
         except EmptyIndexError as exc:
             raise ToolError(str(exc)) from exc
-        return {
+        result = {
             "query": query,
             "results": [
                 {
@@ -206,6 +207,7 @@ def create_server(
                 for rank, h in enumerate(hits, 1)
             ],
         }
+        return _with_partial_warning(result, kb)
 
     @mcp.tool(
         description=(
@@ -222,6 +224,12 @@ def create_server(
         return status
 
     return mcp
+
+
+def _with_partial_warning(result: dict[str, Any], kb: KnowledgeBase) -> dict[str, Any]:
+    """Put the partial-index warning first, so the host agent sees it before the results."""
+    warning = kb.partial_index_warning()
+    return {"warning": warning, **result} if warning else result
 
 
 def main() -> None:

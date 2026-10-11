@@ -164,3 +164,45 @@ def test_check_llm_never_raises_on_odd_replies(settings, monkeypatch):
     status = check_llm(settings)
     assert status["reachable"] is False
     assert "AttributeError" in status["error"]
+
+
+class SlowEmbeddings(HashEmbeddings):
+    """Lets the test decide when each embedding batch is computed."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.gate = threading.Semaphore(0)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        assert self.gate.acquire(timeout=10)
+        return super().embed_documents(texts)
+
+
+async def test_partial_index_results_carry_a_warning(settings, docs_dir: Path):
+    emb = SlowEmbeddings()
+    kb = KnowledgeBase(settings.model_copy(update={"embedding_batch_size": 2}), embeddings=emb)
+    llm = fake_llm()
+    server = create_server(
+        settings,
+        kb=kb,
+        models=ChatModels(chat=llm, json=llm),
+        llm_check=lambda: None,
+        llm_status=lambda: LLM_OK,
+    )
+    job = kb.start_indexing(docs_dir)
+    emb.gate.release(2)  # a few chunks are searchable, most are not yet
+    while job.chunks_done < 4:
+        assert not job.wait(0.01)
+
+    async with Client(server) as client:
+        found = data(await client.call_tool("find_relevant_docs", {"query": "Сойка"}))
+        assert "partial index" in found["warning"]
+        assert "4/" in found["warning"]
+        answer = data(await client.call_tool("ask_question", {"question": "Какой e-steps?"}))
+        assert "partial index" in answer["warning"]
+
+        emb.gate.release(100)
+        assert job.wait(10)
+        found = data(await client.call_tool("find_relevant_docs", {"query": "Сойка"}))
+        assert "warning" not in found
