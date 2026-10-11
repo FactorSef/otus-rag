@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     server_port: int = Field(8000, ge=1, le=65535)
     server_transport: Literal["http", "stdio"] = "http"
     log_level: str = "INFO"
+    # What the knowledge base is about. Inserted into the MCP tool descriptions so that
+    # host agents (Copilot, Claude...) know when to use the tools. Change it together with
+    # the indexed documents.
+    kb_topic: str = (
+        "3D printing: printers (Anet A8, Wanhao Duplicator 6, Bambu Lab P1P, Snapmaker U1, "
+        "Prusa...), firmware (Marlin, Klipper), electronics (RAMPS, MOSFETs, heated beds), "
+        "calibration, filaments, and the internal documentation of our print workshop "
+        "(printer fleet, procedures, incident log, tools)"
+    )
 
     # --- LLM (external; only ask_question needs it) ---
     llm_provider: LLMProvider = "ollama"
@@ -38,6 +47,10 @@ class Settings(BaseSettings):
     llm_model: str = "qwen2.5:3b"
     llm_temperature: float = Field(0.0, ge=0.0, le=2.0)
     llm_timeout_s: float = Field(120.0, gt=0)
+    # Appended to every user prompt: model-specific switches, e.g. "/no_think" for qwen3
+    # (disables slow reasoning). Empty for models without such switches.
+    llm_prompt_suffix: str = ""
+    llm_num_ctx: int = Field(8192, ge=512)  # Ollama only: context window to request
 
     # --- Embeddings ---
     embedding_provider: EmbeddingProvider = "local"
@@ -71,7 +84,9 @@ class Settings(BaseSettings):
     # --- Corrective RAG graph ---
     min_relevant: int = Field(2, ge=1)
     max_retries: int = Field(2, ge=0)
-    grade_max_chars: int = Field(1500, ge=200)
+    grade_max_chars: int = Field(1500, ge=200)  # chunk text shown to the grader
+    grade_concurrency: int = Field(4, ge=1)  # parallel grading requests
+    max_context_chars: int = Field(6000, ge=500)  # context budget for the answer
 
     @model_validator(mode="after")
     def _check_consistency(self) -> Self:

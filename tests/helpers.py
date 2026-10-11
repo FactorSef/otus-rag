@@ -3,9 +3,14 @@
 import hashlib
 import math
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from rag_kb.retrieval.bm25 import tokenize
 
@@ -106,3 +111,28 @@ def write_files(root: Path, files: dict[str, str]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(content), encoding="utf-8")
     return root
+
+
+class ScriptedChatModel(BaseChatModel):
+    """Mock LLM: ``handler(system_prompt, user_prompt) -> reply``; records every call.
+
+    Unlike ``FakeListChatModel`` the reply depends on the prompt, not on call order, so
+    it stays deterministic when chunks are graded concurrently.
+    """
+
+    handler: Callable[[str, str], str]
+    calls: list[tuple[str, str]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        system = messages[0].content if len(messages) > 1 else ""
+        user = messages[-1].content
+        self.calls.append((system, user))
+        reply = AIMessage(self.handler(system, user))
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
+    def calls_to(self, system_prefix: str) -> list[str]:
+        return [user for system, user in self.calls if system.startswith(system_prefix)]
