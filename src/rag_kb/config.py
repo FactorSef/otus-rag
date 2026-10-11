@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     max_file_size_kb: int = Field(1024, ge=1)
     chunk_size: int = Field(800, ge=100)
     chunk_overlap: int = Field(120, ge=0)
+    # index_folder runs in the background; the tool call waits this long for it to finish
+    # and otherwise returns immediately with a job to follow via index_status.
+    index_wait_s: float = Field(5.0, ge=0)
 
     # --- Retrieval ---
     retrieve_k: int = Field(6, ge=1, le=50)

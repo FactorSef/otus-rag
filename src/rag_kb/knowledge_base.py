@@ -2,10 +2,11 @@
 
 One instance lives for the lifetime of the server. The BM25 index is held in memory and
 rebuilt from Chroma (the single source of truth) on start-up and after every indexing run.
+Indexing runs in a background thread (see ``indexing/jobs.py``); searches keep working
+on the previous data meanwhile.
 """
 
 import logging
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,8 @@ from langchain_core.embeddings import Embeddings
 
 from rag_kb.config import Settings
 from rag_kb.indexing.chunkers import Chunker
-from rag_kb.indexing.indexer import Indexer, IndexReport, ProgressCallback
+from rag_kb.indexing.indexer import Indexer, IndexReport
+from rag_kb.indexing.jobs import IndexingInProgressError, IndexJob, JobRunner
 from rag_kb.retrieval.bm25 import BM25Index
 from rag_kb.retrieval.embeddings import create_embeddings, embedding_id
 from rag_kb.retrieval.hybrid import HybridSearch, SearchHit
@@ -24,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 class EmptyIndexError(RuntimeError):
     """Search requested before anything was indexed."""
+
+
+class IndexingFailedError(RuntimeError):
+    """A background indexing job ended with an error."""
 
 
 class KnowledgeBase:
@@ -41,7 +47,7 @@ class KnowledgeBase:
             max_file_size_kb=settings.max_file_size_kb,
             batch_size=settings.embedding_batch_size,
         )
-        self._lock = threading.Lock()  # one indexing run at a time
+        self.jobs = JobRunner()
         self._bm25 = BM25Index([])
         self.search_engine = HybridSearch(
             store=self.store,
@@ -62,16 +68,32 @@ class KnowledgeBase:
     def is_empty(self) -> bool:
         return self.store.count() == 0
 
-    def index_folder(
-        self, path: str | Path, pattern: str = "**/*", progress: ProgressCallback | None = None
-    ) -> IndexReport:
-        with self._lock:
-            report = self.indexer.run(Path(path), pattern or "**/*", progress)
-            self._rebuild_bm25()
-            return report
+    def start_indexing(self, path: str | Path, pattern: str = "**/*") -> IndexJob:
+        """Validate and plan synchronously, then embed in the background.
+
+        Raises ``IndexingError`` (bad request) or ``IndexingInProgressError``.
+        """
+        if self.jobs.busy:  # fail fast, before planning against a half-written index
+            raise IndexingInProgressError(
+                "Another indexing job is running; check index_status and retry later."
+            )
+        plan = self.indexer.plan(Path(path), pattern or "**/*")
+        return self.jobs.submit(plan, self.indexer.apply, on_finish=self._rebuild_bm25)
+
+    def index_folder(self, path: str | Path, pattern: str = "**/*") -> IndexReport:
+        """Index and wait for completion (scripts and tests)."""
+        job = self.start_indexing(path, pattern)
+        job.wait(None)
+        if job.state == "failed" or job.report is None:
+            raise IndexingFailedError(job.error or "indexing failed")
+        return job.report
 
     def search(self, query: str, k: int) -> list[SearchHit]:
         if self.is_empty:
+            if self.jobs.busy:
+                raise EmptyIndexError(
+                    "The knowledge base is still being indexed; check index_status."
+                )
             raise EmptyIndexError("The knowledge base is empty: call index_folder first.")
         return self.search_engine.search(query, k)
 
@@ -88,6 +110,8 @@ class KnowledgeBase:
             "indexed_roots": state.get("roots", []) if chunks else [],
             "embedding_model": self.embedding_id,
         }
+        if self.jobs.current:
+            result["indexing"] = self.jobs.current.to_dict()
         if chunks and stored_model and stored_model != self.embedding_id:
             result["warning"] = (
                 f"Index was built with '{stored_model}' but the server is configured for "

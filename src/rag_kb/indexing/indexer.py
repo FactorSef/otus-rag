@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from rag_kb.indexing.chunkers import Chunker, search_text
@@ -45,6 +46,18 @@ class IndexReport:
         return asdict(self)
 
 
+@dataclass
+class IndexPlan:
+    """What an indexing run will do; produced quickly, before any embedding work."""
+
+    root: Path
+    report: IndexReport
+    previous_roots: list[str]
+    changed: list[str] = field(default_factory=list)  # sources to (re-)embed
+    stale: list[str] = field(default_factory=list)  # sources gone from disk
+    chunks: list[Document] = field(default_factory=list)
+
+
 class Indexer:
     def __init__(
         self,
@@ -64,10 +77,11 @@ class Indexer:
         self.max_file_size_kb = max_file_size_kb
         self.batch_size = batch_size
 
-    def run(
-        self, root: Path, pattern: str = "**/*", progress: ProgressCallback | None = None
-    ) -> IndexReport:
-        started = time.perf_counter()
+    def plan(self, root: Path, pattern: str = "**/*") -> IndexPlan:
+        """Validate the request, scan and chunk files. Fast and read-only.
+
+        Raises ``IndexingError`` for a bad path or when nothing can be indexed.
+        """
         root = root.expanduser()
         if not root.exists():
             raise IndexingError(f"Folder not found: {root}")
@@ -75,28 +89,22 @@ class Indexer:
             raise IndexingError(f"Not a folder: {root}")
         root = root.resolve()
 
-        report = IndexReport(root=source_id(root), pattern=pattern)
-        state = self.store.load_state()
-        if self.store.count() and state.get("embedding_id") != self.embedding_id:
-            logger.warning(
-                "Embedding model changed (%s -> %s): rebuilding index",
-                state.get("embedding_id"),
-                self.embedding_id,
-            )
-            self.store.reset()
-            report.index_reset = True
-
         scan = scan_folder(root, pattern, self.extensions, self.max_file_size_kb)
-        report.skipped_count = len(scan.skipped)
-        report.skipped = [f"{p}: {why}" for p, why in scan.skipped[:MAX_REPORTED_SKIPS]]
         if not scan.files:
             raise IndexingError(
                 f"No supported files in {root} matching '{pattern}' "
                 f"(supported: {', '.join(self.extensions)}; skipped {len(scan.skipped)})"
             )
 
-        indexed = self.store.source_hashes()
-        changed, chunks = [], []
+        state = self.store.load_state()
+        reset = self.store.count() > 0 and state.get("embedding_id") != self.embedding_id
+        indexed = {} if reset else self.store.source_hashes()
+
+        report = IndexReport(root=source_id(root), pattern=pattern, index_reset=reset)
+        report.skipped_count = len(scan.skipped)
+        report.skipped = [f"{p}: {why}" for p, why in scan.skipped[:MAX_REPORTED_SKIPS]]
+
+        plan = IndexPlan(root=root, report=report, previous_roots=state.get("roots", []))
         for file in scan.files:
             digest = hashlib.sha1(file.text.encode()).hexdigest()
             if indexed.get(file.source) == digest:
@@ -105,37 +113,49 @@ class Indexer:
             file_chunks = self.chunker.split(file)
             for chunk in file_chunks:
                 chunk.metadata["file_hash"] = digest
-            changed.append(file.source)
-            chunks.extend(file_chunks)
+                chunk.metadata["file_chunks"] = len(file_chunks)
+            plan.changed.append(file.source)
+            plan.chunks.extend(file_chunks)
             report.by_type[file.file_type] = report.by_type.get(file.file_type, 0) + 1
+        plan.stale = [] if reset else self._stale_sources(root, indexed)
+        return plan
 
-        stale = self._stale_sources(root, indexed)
-        self.store.delete_sources(changed + stale)
-        report.files_removed = len(stale)
+    def apply(self, plan: IndexPlan, progress: ProgressCallback | None = None) -> IndexReport:
+        """Embed and store the planned chunks. Slow: run it in the background."""
+        started = time.perf_counter()
+        report = plan.report
+        if report.index_reset:
+            logger.warning("Embedding model changed: rebuilding index as %s", self.embedding_id)
+            self.store.reset()
+        # Drop old chunks of changed files first: no duplicates, shortened files handled.
+        self.store.delete_sources(plan.changed + plan.stale)
+        report.files_removed = len(plan.stale)
+        # Record the vector space before writing vectors: if this run is interrupted,
+        # the next one must keep (not wipe) the chunks already written.
+        self.store.save_state({**self.store.load_state(), "embedding_id": self.embedding_id})
 
-        self._embed_and_store(chunks, progress)
-        report.files_indexed = len(changed)
-        report.chunks_written = len(chunks)
+        self._embed_and_store(plan.chunks, progress)
+        report.files_indexed = len(plan.changed)
+        report.chunks_written = len(plan.chunks)
 
         hashes = self.store.source_hashes()
         report.total_files = len(hashes)
         report.total_chunks = self.store.count()
         report.duration_s = round(time.perf_counter() - started, 2)
 
-        previous_roots = [] if report.index_reset else state.get("roots", [])
-        roots = sorted({*previous_roots, report.root})
+        previous_roots = [] if report.index_reset else plan.previous_roots
         self.store.save_state(
             {
                 "embedding_id": self.embedding_id,
                 "last_indexed_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                "roots": roots,
+                "roots": sorted({*previous_roots, report.root}),
                 "files_by_type": dict(Counter(s.rsplit(".", 1)[-1] for s in hashes)),
                 "last_run": report.to_dict(),
             }
         )
         logger.info(
             "Indexed %s: %d changed, %d unchanged, %d removed, %d chunks in %.1fs",
-            root,
+            plan.root,
             report.files_indexed,
             report.files_unchanged,
             report.files_removed,
@@ -143,6 +163,11 @@ class Indexer:
             report.duration_s,
         )
         return report
+
+    def run(
+        self, root: Path, pattern: str = "**/*", progress: ProgressCallback | None = None
+    ) -> IndexReport:
+        return self.apply(self.plan(root, pattern), progress)
 
     def _stale_sources(self, root: Path, indexed: dict[str, str]) -> list[str]:
         """Previously indexed files under ``root`` that no longer exist on disk."""
@@ -157,7 +182,7 @@ class Indexer:
                 stale.append(source)
         return stale
 
-    def _embed_and_store(self, chunks, progress: ProgressCallback | None) -> None:
+    def _embed_and_store(self, chunks: list[Document], progress: ProgressCallback | None) -> None:
         total = len(chunks)
         for start in range(0, total, self.batch_size):
             batch = chunks[start : start + self.batch_size]

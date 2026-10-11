@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -57,9 +58,18 @@ class ChromaStore:
         return self._collection.count()
 
     def source_hashes(self) -> dict[str, str]:
-        """``{source: file_hash}`` for every indexed file."""
+        """``{source: file_hash}`` for every *completely* indexed file.
+
+        A file whose chunks were only partly written (indexing interrupted by an error or
+        a restart) is left out, so the next run re-indexes it instead of skipping it.
+        """
         got = self._collection.get(include=["metadatas"])
-        return {m["source"]: m.get("file_hash", "") for m in got["metadatas"]}
+        counts = Counter(m["source"] for m in got["metadatas"])
+        return {
+            m["source"]: m.get("file_hash", "")
+            for m in got["metadatas"]
+            if counts[m["source"]] >= m.get("file_chunks", 0)
+        }
 
     def all_documents(self) -> list[Document]:
         got = self._collection.get(include=["documents", "metadatas"])
