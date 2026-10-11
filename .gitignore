@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local config & data
+.env
+data/
+.cache/
+
+# Source dump of 3dprint.wiki (images, pdf); indexed content lives in sample_docs/
+raw/
+
+# IDE / OS
+.idea/
+.DS_Store
+Thumbs.db

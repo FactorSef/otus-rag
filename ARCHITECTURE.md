@@ -1,0 +1,198 @@
+# Архитектура RAG Knowledge Base
+
+MCP‑сервер, превращающий папку с документами в поисковую базу знаний. Внутри — Corrective RAG на LangGraph, гибридный поиск (BM25 + вектор → RRF) и внешняя LLM, адрес которой передаётся через конфиг.
+
+## 1. Компоненты
+
+```
+┌──────────── IDE (VS Code Copilot / Claude / MCP Inspector) ────────────┐
+│  .vscode/mcp.json → http://localhost:8000/mcp                          │
+└───────────────────────────────┬────────────────────────────────────────┘
+                                │ MCP, streamable HTTP
+┌───────────────────────────────▼────────────────────────────────────────┐
+│ rag-server (Docker)                                                    │
+│                                                                        │
+│  server.py ─ FastMCP: index_folder · ask_question ·                    │
+│              find_relevant_docs · index_status                         │
+│      │                               │                                 │
+│  indexing/                      graph/ (LangGraph CRAG)                │
+│  loaders → chunkers → indexer   rewrite → retrieve → grade → generate  │
+│      │                               │          ▲         │            │
+│      ▼                               ▼          └─ broaden┘            │
+│  retrieval/                                                            │
+│   HybridRetriever = EnsembleRetriever(BM25, Chroma) с RRF              │
+│   ├─ BM25 (rank_bm25, в памяти, перестраивается из Chroma)             │
+│   └─ Chroma PersistentClient (volume /data/chroma)                     │
+│   Embeddings: fastembed multilingual-e5-large (в образе) | ollama |    │
+│               openai | chroma-default                                  │
+└───────────────────────────────┬────────────────────────────────────────┘
+                                │ HTTP (LLM_BASE_URL)
+                    ┌───────────▼─────────────┐
+                    │ Внешняя LLM             │
+                    │ Ollama / OpenAI‑совм.   │
+                    │ (или профиль local-llm) │
+                    └─────────────────────────┘
+```
+
+| Модуль | Ответственность |
+|---|---|
+| `config.py` | Все настройки (`pydantic-settings`, env / `.env`). Никаких констант в коде. |
+| `server.py` | MCP‑инструменты, их описания, валидация входа, преобразование ошибок в понятные сообщения. |
+| `indexing/loaders.py` | Обход папки по glob, фильтр по расширениям, чтение с определением кодировки. |
+| `indexing/chunkers.py` | Стратегия разбиения по типу файла, метаданные позиции. |
+| `indexing/indexer.py` | Оркестрация: загрузка → чанки → эмбеддинги → upsert в Chroma → перестройка BM25 → статистика. |
+| `retrieval/embeddings.py` | Фабрика эмбеддингов по `EMBEDDING_PROVIDER`, префиксы e5. |
+| `retrieval/store.py` | Обёртка над Chroma: upsert, удаление по файлу, выгрузка всех чанков, метаданные коллекции. |
+| `retrieval/bm25.py` | Токенизатор (RU/EN, идентификаторы) и BM25‑ретривер. |
+| `retrieval/hybrid.py` | `EnsembleRetriever` (RRF) поверх BM25 и вектора. |
+| `llm.py` | Фабрика `BaseChatModel` по `LLM_PROVIDER` (ollama / openai), проверка доступности. |
+| `graph/` | Состояние, промпты, узлы и сборка графа CRAG. |
+
+## 2. Развёртывание
+
+```yaml
+services:
+  rag-server:              # всегда
+    ports: ["8000:8000"]
+    volumes: [./sample_docs:/app/sample_docs:ro, chroma:/data/chroma]
+    env_file: .env
+    extra_hosts: ["host.docker.internal:host-gateway"]   # Linux
+  ollama:                  # profiles: [local-llm]
+  ollama-init:             # profiles: [local-llm] — ollama pull $LLM_MODEL
+```
+
+- `docker compose up` — только сервер; LLM внешняя (`LLM_BASE_URL`, по умолчанию `http://host.docker.internal:11434`).
+- `docker compose --profile local-llm up` — дополнительно поднимает Ollama и скачивает модель; в `.env` указывается `LLM_BASE_URL=http://ollama:11434`.
+- Рабочая директория контейнера — `/app`, поэтому `index_folder("./sample_docs")` работает буквально. Свои документы монтируются через `DOCS_DIR`.
+- Модель эмбеддингов скачивается **на этапе сборки образа**: первый запуск не зависит от сети, индексация и поиск работают без LLM.
+- Сервер стартует, даже если LLM недоступна: проверка выполняется при старте (только предупреждение в логе) и при вызове `ask_question` (понятная ошибка с адресом и именем модели).
+
+## 3. Конфигурация
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `LLM_PROVIDER` | `ollama` | `ollama` \| `openai` (любой OpenAI‑совместимый API: LM Studio, vLLM, llama.cpp) |
+| `LLM_BASE_URL` | `http://host.docker.internal:11434` | Адрес API |
+| `LLM_API_KEY` | — | Для `openai` |
+| `LLM_MODEL` | `qwen2.5:3b` | Модель генерации |
+| `LLM_TEMPERATURE` | `0` | — |
+| `LLM_TIMEOUT_S` | `120` | Таймаут запроса |
+| `EMBEDDING_PROVIDER` | `local` | `local` (fastembed) \| `ollama` \| `openai` \| `chroma` |
+| `EMBEDDING_MODEL` | `intfloat/multilingual-e5-large` | Имя модели для выбранного провайдера |
+| `EMBEDDING_BASE_URL` | = `LLM_BASE_URL` | Для `ollama` / `openai` |
+| `CHROMA_PATH` | `./data/chroma` (в Docker — `/data/chroma`, volume) | Персистентное хранилище |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `800` / `120` | Символы |
+| `RETRIEVE_K` | `6` | Сколько чанков отдаёт гибридный поиск в граф |
+| `BM25_WEIGHT` / `VECTOR_WEIGHT` / `RRF_C` | `0.5` / `0.5` / `60` | Веса списков и константа RRF |
+| `MIN_RELEVANT` | `2` | Порог «достаточно релевантных» |
+| `MAX_RETRIES` | `2` | Максимум циклов broaden → retrieve |
+
+## 4. Индексация
+
+### 4.1. Разбиение на чанки
+
+Стратегия выбирается по расширению: смысловая единица у текста и кода разная.
+
+| Тип | Стратегия | Зачем |
+|---|---|---|
+| `.md` | `MarkdownHeaderTextSplitter` (h1–h3) → `RecursiveCharacterTextSplitter` | Раздел вики — естественная единица смысла; цепочка заголовков добавляется в метаданные и в текст чанка (контекст для эмбеддинга и BM25). |
+| `.txt` | `RecursiveCharacterTextSplitter` (абзац → строка → предложение) | Нет структуры, режем по естественным границам. |
+| `.py` `.js` `.ts` | `RecursiveCharacterTextSplitter.from_language(...)` | Режет по границам классов/функций; функция целиком лучше отвечает на вопрос «где/как используется X». |
+| `.json` | `RecursiveJsonSplitter` | Чанк — поддерево с сохранением пути ключей. |
+| `.yaml` | Разбор по ключам верхнего уровня, крупные блоки дорезаются рекурсивно | Аналогично JSON, YAML остаётся читаемым. |
+
+Метаданные каждого чанка: `source` (путь относительно индексируемой папки), `file_type`, `chunk_index`, `start_line`, `end_line`, `section` (заголовки / путь ключей для md/json/yaml).
+
+### 4.2. Идемпотентность
+
+- `id = sha1(source + ":" + chunk_index)`.
+- Перед upsert файла его старые чанки удаляются (`where={"source": ...}`) — повторная индексация не создаёт дублей и корректно обрабатывает укоротившиеся файлы.
+- Статистика (`files`, `chunks`, `last_indexed_at`, `embedding_model`, `root`) хранится в метаданных коллекции и переживает рестарт.
+- Если `embedding_model` в коллекции не совпадает с конфигом — `index_status` предупреждает, `index_folder` пересоздаёт коллекцию (векторы разных моделей несовместимы).
+
+### 4.3. Эмбеддинги
+
+По умолчанию — `intfloat/multilingual-e5-large` через fastembed (ONNX, без torch), 1024 измерения, RU+EN в одном пространстве: русский вопрос находит английский чанк и наоборот.
+
+Особенность e5: модель обучена с префиксами — при индексации текст отправляется как `passage: …`, запрос как `query: …`. Префиксы добавляет обёртка в `embeddings.py`, остальной код о них не знает. Ограничение длины — 512 токенов, что покрывает чанк в 800 символов с запасом.
+
+## 5. Гибридный поиск
+
+- **BM25** (`rank_bm25.BM25Okapi`, собственный `BaseRetriever` — `langchain-community` объявлен устаревшим) — точное совпадение слов. Токенизатор: нижний регистр, `\w+` с поддержкой кириллицы, идентификаторы сохраняются целиком и дополнительно разбиваются на части (`TOKEN_EXPIRY_HOURS` → `token_expiry_hours`, `token`, `expiry`, `hours`; `camelCase` → `camel`, `case`).
+- **Вектор** — косинусная близость в Chroma.
+- **RRF** — `EnsembleRetriever`: `score(d) = Σ wᵢ / (60 + rankᵢ(d))`. Документ, высоко стоящий в обоих списках, побеждает документ, найденный только одним методом.
+- BM25 живёт в памяти и перестраивается из содержимого Chroma при старте и после каждой индексации — источник истины один.
+
+`find_relevant_docs` вызывает только этот слой (без LLM).
+
+## 6. Граф Corrective RAG
+
+```
+START → rewrite → retrieve → grade ─┬─ relevant ≥ MIN_RELEVANT ───────────► generate → END
+                     ▲              ├─ мало, retries < MAX_RETRIES → broaden ─┐
+                     └──────────────┼─────────────────────────────────────────┘
+                                    └─ мало, лимит исчерпан ──────────────► generate
+```
+
+**Состояние:** `question`, `queries`, `retrieved`, `relevant` (накапливается между циклами, без дублей), `retries`, `answer`, `sources`.
+
+| Узел | Что делает |
+|---|---|
+| `rewrite` | LLM формулирует поисковый запрос на RU и EN. Исходный вопрос тоже остаётся в `queries` — маленькая модель может исказить точный идентификатор. |
+| `retrieve` | Гибридный поиск по каждому запросу, объединение, исключение уже оценённых чанков. |
+| `grade` | LLM оценивает каждый чанк отдельно: `{"relevant": "yes"/"no"}`. Ответ разбирается устойчиво (JSON → поиск yes/no в тексте → «no»). |
+| `broaden` | LLM расширяет запрос: синонимы, более общие термины, перевод. `retries += 1`. |
+| `generate` | Ответ строго по контексту, на языке вопроса, со ссылками `[source:start-end]`. Если релевантных чанков нет — честное «в базе знаний не найдено». |
+
+Граф собирается функцией `build_graph(llm, retriever, settings)`; в тестах подставляются `FakeListChatModel` и заглушка ретривера.
+
+## 7. MCP‑инструменты
+
+| Инструмент | Вход | Выход | Ошибки |
+|---|---|---|---|
+| `index_folder` | `path`, `glob="**/*"` | файлов, чанков, пропущено, время | путь не существует / не папка; нет подходящих файлов |
+| `ask_question` | `question` | `answer`, `sources[]`, `retries`, `relevant_chunks` | пустой индекс; LLM недоступна / модель не найдена |
+| `find_relevant_docs` | `query`, `top_k=5` | список чанков: текст, `source`, строки, ранг | пустой индекс; `top_k` вне диапазона |
+| `index_status` | — | файлы, чанки, `last_indexed_at`, модель эмбеддингов, статус LLM | — |
+
+Описания инструментов прямо говорят, что это **внутренняя база знаний проекта** (3D‑печать: принтеры, прошивки, Klipper, мастерская), и что для вопросов по этим темам её нужно использовать раньше общих знаний — от этого зависит, выберет ли хост‑агент инструмент без подсказки.
+
+## 8. Демо‑корпус (`sample_docs/`)
+
+| Папка | Источник | Язык |
+|---|---|---|
+| `wiki/` | 3dprint.wiki (из `raw/`), переведено на русский | RU |
+| `klipper/` | Документация Klipper и часть `klippy/*.py` (GPLv3, с атрибуцией) | EN |
+| `lab/` | Сгенерированная база вымышленной мастерской: регламенты, журнал, `fleet.yaml`, `filaments.json`, утилиты `.py/.js/.ts`, логи `.txt`. Содержит проверочные факты. | RU + EN |
+
+Проверочные факты разнесены по форматам и языкам; список — в README.md.
+
+## 9. Тесты
+
+Без сети и без LLM: эмбеддинги заменяются детерминированной заглушкой, LLM — `FakeListChatModel`.
+
+- Индексатор: чанкинг каждого формата, метаданные, glob‑фильтр, повторная индексация без дублей.
+- Поиск: токенизатор BM25, RRF поднимает документ из обоих списков.
+- Граф: прямой путь, один цикл broaden, выход по лимиту, устойчивость к невалидному JSON.
+- e2e: in‑memory клиент FastMCP вызывает все 4 инструмента, включая ошибочные входы.
+
+CI (GitHub Actions): `ruff check`, `ruff format --check`, `pytest`, сборка Docker‑образа.
+
+## 10. Структура проекта
+
+```
+otus-rag/
+├── src/rag_kb/
+│   ├── config.py
+│   ├── llm.py
+│   ├── server.py
+│   ├── indexing/   loaders.py · chunkers.py · indexer.py
+│   ├── retrieval/  embeddings.py · store.py · bm25.py · hybrid.py
+│   └── graph/      state.py · prompts.py · nodes.py · builder.py
+├── tests/
+├── sample_docs/
+├── Dockerfile · docker-compose.yml · .env.example
+├── .vscode/mcp.json
+├── .github/workflows/ci.yml
+└── README.md · ARCHITECTURE.md · REPORT.md
+```
