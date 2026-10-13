@@ -89,6 +89,7 @@ async def test_grader_checklist(server, docs_dir: Path):
         )
         assert "97.3" in answer["answer"]
         assert answer["sources"]
+        assert answer["low_confidence"] is False
         assert any(s["source"].endswith(("fleet.yaml", "notes.txt")) for s in answer["sources"])
         assert answer["steps"][0].startswith("rewrite")
         assert progress and progress[-1] == "Generated the answer"

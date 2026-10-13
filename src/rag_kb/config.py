@@ -44,13 +44,20 @@ class Settings(BaseSettings):
     llm_provider: LLMProvider = "ollama"
     llm_base_url: str = "http://host.docker.internal:11434"
     llm_api_key: SecretStr | None = None
-    llm_model: str = "qwen2.5:3b"
+    # Qwen3-4B-Instruct-2507: no reasoning mode at all. The bare Ollama tag `qwen3:4b` is the
+    # Thinking-2507 model: it cannot switch reasoning off (`think: false` makes it reason in
+    # the answer text) and spends 40+ s per call on CPU.
+    llm_model: str = "qwen3:4b-instruct-2507-q4_K_M"
     llm_temperature: float = Field(0.0, ge=0.0, le=2.0)
     llm_timeout_s: float = Field(120.0, gt=0)
     # Appended to every user prompt: model-specific switches, e.g. "/no_think" for qwen3
     # (disables slow reasoning). Empty for models without such switches.
     llm_prompt_suffix: str = ""
     llm_num_ctx: int = Field(8192, ge=512)  # Ollama only: context window to request
+    # Reply length caps. Without them a small model in JSON mode can loop for thousands
+    # of tokens (minutes on CPU); LLM_TIMEOUT_S does not stop a streaming reply.
+    llm_max_tokens: int = Field(1024, ge=16)  # answers
+    llm_json_max_tokens: int = Field(384, ge=16)  # rewrite, grade, broaden
 
     # --- Embeddings ---
     embedding_provider: EmbeddingProvider = "local"
@@ -87,6 +94,9 @@ class Settings(BaseSettings):
     grade_max_chars: int = Field(1500, ge=200)  # chunk text shown to the grader
     grade_concurrency: int = Field(4, ge=1)  # parallel grading requests
     max_context_chars: int = Field(6000, ge=500)  # context budget for the answer
+    # When the grader rejects everything, chunks ranked within the top N of BOTH the BM25
+    # and the vector list are still used for the answer, marked as low confidence (0 = off).
+    fallback_max_rank: int = Field(10, ge=0)
 
     @model_validator(mode="after")
     def _check_consistency(self) -> Self:

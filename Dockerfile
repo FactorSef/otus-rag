@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# ---------- build: dependencies in a virtualenv --------------------------------------------
-FROM python:3.12.13-slim-bookworm AS build
+# ---------- deps: dependencies in a virtualenv ---------------------------------------------
+FROM python:3.12.13-slim-bookworm AS deps
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
@@ -11,9 +11,13 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /src
 # Dependencies first: this layer is cached until pyproject.toml / uv.lock change.
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
+
+# ---------- build: the project itself ------------------------------------------------------
+FROM deps AS build
+COPY README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
@@ -21,7 +25,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------- models: embedding model baked into the image -----------------------------------
 # The first start then needs no network, and indexing / search work without any LLM.
 # Set PRELOAD_EMBEDDINGS=0 when using EMBEDDING_PROVIDER=ollama|openai|chroma.
-FROM build AS models
+# Based on deps, not build: code changes must not re-download the model (~2 GB).
+FROM deps AS models
 ARG PRELOAD_EMBEDDINGS=1
 ARG EMBEDDING_MODEL=intfloat/multilingual-e5-large
 RUN mkdir -p /models/fastembed && \

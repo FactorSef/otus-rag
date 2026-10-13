@@ -1,0 +1,115 @@
+# Проверочные факты из README (раздел «Проверочные факты»): они есть только в
+# sample_docs/lab/, поэтому правильный ответ возможен только по базе знаний.
+#
+# Для каждого факта проверяются две формулировки:
+#   question — естественный вопрос (как задаёт пользователь);
+#   keywords — ключевые слова и идентификаторы из кода и конфигов.
+#
+# files   — где лежит факт; источник засчитывается, если его путь заканчивается на одно
+#           из этих значений.
+# expect  — что должно быть в ответе: список групп. Нужны все группы; внутри группы
+#           достаточно одного варианта. Сравнение без учёта регистра, «4,35» = «4.35»,
+#           «18 600» = «18600».
+
+facts:
+  - id: 1
+    question: Когда и кем основана мастерская «Ржавый гусь»?
+    keywords: основатель мастерской Ржавый гусь год основания
+    files: [lab/history.md, lab/README.md]
+    expect:
+      - ["2019"]
+      - ["Сорокин", "Sorokin"]
+
+  - id: 2
+    question: Как зовут талисман мастерской?
+    keywords: талисман мастерской гусь
+    files: [lab/README.md, lab/history.md, lab/faq_clients.md]
+    expect:
+      - ["Шуруп", "Shurup"]
+
+  - id: 3
+    question: Какое значение e-steps у принтера «Сойка»?
+    keywords: soyka e_steps_per_mm
+    files: [lab/fleet.yaml, lab/tools/esteps_calc.py]
+    expect:
+      - ["97.3"]
+
+  - id: 4
+    question: При какой температуре печатать и сушить «Дымчатый кварц» PETG?
+    keywords: Smoky Quartz PETG nozzle_temp bed_temp drying
+    files: [lab/filaments.json, lab/procedures/filament_storage.md]
+    expect:
+      - ["236"]
+      - ["83"]
+      - ["61"]
+
+  - id: 5
+    question: Какая длина линии очистки сопла (purge line)?
+    keywords: PURGE_LINE_LENGTH_MM
+    files: [lab/tools/purge.py, lab/procedures/printer_onboarding.md]
+    expect:
+      - ["143"]
+
+  - id: 6
+    question: Какая минимальная стоимость заказа и цена за грамм?
+    keywords: MINIMUM_ORDER_RUB PRICE_PER_GRAM_RUB
+    files: [lab/tools/pricing.js, lab/faq_clients.md, lab/meetings/2025-09-29-planning.md]
+    expect:
+      - ["740"]
+      - ["4.35"]
+
+  - id: 7
+    question: Как часто меняют сопла на принтерах мастерской?
+    keywords: NOZZLE_SWAP_INTERVAL_HOURS nozzle_swap_hours
+    files: [lab/tools/maintenance.ts, lab/fleet.yaml, lab/procedures/printer_onboarding.md]
+    expect:
+      - ["312"]
+
+  - id: 8
+    question: Сколько максимум может идти ночная печать без присмотра?
+    keywords: night shift max unattended duration NS-7
+    files: [lab/procedures/night_shift.md, lab/incidents/2025-03-17-blue-cloud.md]
+    expect:
+      - ["9 ч 40", "9:40", "9 h 40", "9h40", "9 часов 40"]
+
+  - id: 9
+    question: Что случилось 17 марта 2025 года на принтере «Кедр»?
+    keywords: blue cloud incident Kedr thermistor
+    files:
+      - lab/incidents/2025-03-17-blue-cloud.md
+      - lab/logs/klippy_kedr_2025-03-17.txt
+      - lab/history.md
+    expect:
+      - ["термистор", "thermistor"]
+
+  - id: 10
+    question: Какой размер и допуск у калибровочного «Гусиного кубика»?
+    keywords: Goose Cube outer size tolerance
+    files: [lab/calibration/goose_cube.md, lab/procedures/printer_onboarding.md]
+    expect:
+      - ["23.7"]
+      - ["0.08"]
+
+  - id: 11
+    question: Когда можно забрать заказ и какая гарантия?
+    keywords: выдача заказов гарантия
+    files: [lab/faq_clients.md, lab/tools/order_status.ts, lab/README.md]
+    expect:
+      - ["сред", "wednesday"]
+      - ["19:30"]
+      - ["21 д", "21 к", "21 day", "21-д"]
+
+  - id: 12
+    question: "На каком слое упало задание #4367 и почему?"
+    keywords: "#4367 FAILED layer"
+    files: [lab/logs/print_log_2025-09.txt]
+    expect:
+      - ["212"]
+      - ["спагетти", "spaghetti", "оторв", "отсоедин", "detach"]
+
+  - id: 13
+    question: Почему 2 августа 2025 года «Мамонт» врезался соплом в стол?
+    keywords: Mamont Z crash endstop cable
+    files: [lab/incidents/2025-08-02-mamont-z-crash.md]
+    expect:
+      - ["концевик", "endstop"]

@@ -9,7 +9,13 @@ from helpers import ScriptedChatModel
 from rag_kb.config import Settings
 from rag_kb.graph import prompts
 from rag_kb.graph.builder import build_graph
-from rag_kb.graph.nodes import parse_relevance, question_language
+from rag_kb.graph.nodes import (
+    check_citations,
+    parse_grade,
+    parse_relevance,
+    question_language,
+    verified_quote,
+)
 
 QUESTION = "Какой e-steps у принтера Сойка?"
 
@@ -203,3 +209,111 @@ def test_broaden_remembers_all_tried_queries_and_digs_deeper(settings):
     assert max(calls) > settings.retrieve_k
     graded = [s for s in result["steps"] if s.startswith("grade")]
     assert graded[1] != "grade: 0/0 relevant (total 0)"
+
+
+# --- grader input/output, fallback, citation checks --------------------------------------
+
+
+def ranked(doc: Document, bm25: int | None, vector: int | None) -> Document:
+    return Document(
+        id=doc.id,
+        page_content=doc.page_content,
+        metadata={**doc.metadata, "bm25_rank": bm25, "vector_rank": vector},
+    )
+
+
+def test_grader_sees_rewritten_queries(settings):
+    llm = llm_for({"c1", "c2"})
+    run(llm, FakeSearch({}, default=[*RELEVANT, *NOISE]), settings)
+    for user in llm.calls_to(prompts.GRADE_SYSTEM):
+        assert user.startswith(
+            f"Question: {QUESTION}\nSearch queries: Сойка e-steps; Soyka e-steps"
+        )
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ('{"quote": "e_steps_per_mm: 97.3", "relevant": "yes"}', (True, "e_steps_per_mm: 97.3")),
+        ('{"quote": "none", "relevant": "no"}', (False, "none")),
+        # unescaped quotes break the JSON: the verdict field still decides, not words in the quote
+        ('{"quote": "say "yes" here", "relevant": "no"}', (False, 'say "yes" here')),
+        ('{"quote": "x "no" y", "relevant": "yes"}', (True, 'x "no" y')),
+        ('{"quote": "yes it is', (False, "")),
+    ],
+)
+def test_parse_grade(reply, expected):
+    assert parse_grade(reply) == expected
+
+
+def test_verified_quote_rejects_invented_text():
+    text = "extruder:\n  e_steps_per_mm: 97.3   # calibrated"
+    assert verified_quote("e_steps_per_mm:  97.3", text) == "e_steps_per_mm: 97.3"
+    assert verified_quote("e-steps равен 97.3", text) == ""
+    assert verified_quote("none", text) == ""
+
+
+def test_relevant_chunk_keeps_verified_quote_for_failed_generation(settings):
+    def handler(system: str, user: str) -> str:
+        if system == prompts.GRADE_SYSTEM:
+            if "doc1.md" in user:
+                return '{"quote": "e_steps 97.3", "relevant": "yes"}'
+            if "doc2.md" in user:
+                return '{"quote": "invented 12.5", "relevant": "yes"}'
+            return '{"quote": "none", "relevant": "no"}'
+        if system.startswith("You answer"):
+            return "[2]"  # nothing but a citation
+        return '{"ru": "Сойка", "en": "Soyka"}'
+
+    result = run(ScriptedChatModel(handler=handler), FakeSearch({}, RELEVANT), settings)
+    assert result["answer"].splitlines() == [
+        prompts.ANSWER_FAILED["Russian"],
+        "- «e_steps 97.3» [1]",
+    ]
+    assert "generate: answer had no content besides citations" in result["steps"]
+
+
+def test_citations_of_missing_fragments_are_dropped():
+    answer, dropped, has_content = check_citations("E-steps 97.3 [1][4]. Сопло 0.4 [7].", 2)
+    assert (answer, dropped, has_content) == ("E-steps 97.3 [1]. Сопло 0.4.", [4, 7], True)
+    assert check_citations("[2]", 2) == ("[2]", [], False)
+    assert check_citations("[3]", 2) == ("", [3], False)
+
+
+def test_fallback_uses_top_ranked_chunks_rejected_by_grader(settings):
+    llm = llm_for(set())  # the grader rejects everything
+    strong = ranked(RELEVANT[0], bm25=2, vector=3)
+    weak = [ranked(NOISE[0], bm25=1, vector=None), ranked(NOISE[1], bm25=15, vector=1)]
+    result = run(llm, FakeSearch({}, default=[strong, *weak]), settings)
+
+    assert result["low_confidence"] is True
+    assert [s["source"] for s in result["sources"]] == ["lab/doc1.md"]
+    assert result["answer"].startswith(prompts.LOW_CONFIDENCE_NOTE["Russian"])
+    assert any("low confidence" in s for s in result["steps"])
+
+
+def test_fallback_can_be_disabled(settings):
+    search = FakeSearch({}, default=[ranked(RELEVANT[0], bm25=1, vector=1)])
+    result = run(llm_for(set()), search, settings.model_copy(update={"fallback_max_rank": 0}))
+    assert result["answer"] == prompts.NOT_FOUND["Russian"]
+    assert result["low_confidence"] is False
+
+
+def test_retrieve_keeps_best_rank_over_queries(settings):
+    # The same chunk is found by two queries with different per-list ranks.
+    table = {
+        "сойка": [ranked(RELEVANT[0], bm25=8, vector=2)],
+        "soyka": [ranked(RELEVANT[0], bm25=1, vector=9)],
+    }
+    llm = llm_for({"c1"})
+    result = run(llm, FakeSearch(table, default=[]), settings)
+    meta = result["relevant"][0].metadata
+    assert (meta["bm25_rank"], meta["vector_rank"]) == (1, 2)
+
+
+def test_broaden_is_told_what_was_rejected(settings):
+    llm = llm_for(set())
+    run(llm, FakeSearch({}, default=NOISE), settings)
+    first = llm.calls_to(prompts.BROADEN_SYSTEM)[0]
+    assert "- lab/doc3.md: Сушка филамента PETG" in first
+    assert "- lab/doc4.md: Klipper pressure advance" in first

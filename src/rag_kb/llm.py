@@ -37,22 +37,28 @@ def create_chat_models(settings: Settings) -> ChatModels:
             "num_ctx": settings.llm_num_ctx,
             "client_kwargs": {"timeout": settings.llm_timeout_s},
         }
-        return ChatModels(chat=ChatOllama(**common), json=ChatOllama(**common, format="json"))
+        return ChatModels(
+            chat=ChatOllama(**common, num_predict=settings.llm_max_tokens),
+            json=ChatOllama(**common, format="json", num_predict=settings.llm_json_max_tokens),
+        )
 
     from langchain_openai import ChatOpenAI
 
     key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "not-needed"
     # JSON mode is not supported uniformly by OpenAI-compatible servers; prompts ask for
     # JSON and parsing is tolerant, so the same model serves both roles.
-    model = ChatOpenAI(
-        model=settings.llm_model,
-        base_url=settings.llm_base_url,
-        api_key=key,
-        temperature=settings.llm_temperature,
-        timeout=settings.llm_timeout_s,
-        max_retries=1,
+    common = {
+        "model": settings.llm_model,
+        "base_url": settings.llm_base_url,
+        "api_key": key,
+        "temperature": settings.llm_temperature,
+        "timeout": settings.llm_timeout_s,
+        "max_retries": 1,
+    }
+    return ChatModels(
+        chat=ChatOpenAI(**common, max_tokens=settings.llm_max_tokens),
+        json=ChatOpenAI(**common, max_tokens=settings.llm_json_max_tokens),
     )
-    return ChatModels(chat=model, json=model)
 
 
 def check_llm(settings: Settings, timeout: float = 5.0) -> dict:

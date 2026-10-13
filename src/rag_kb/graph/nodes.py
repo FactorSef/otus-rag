@@ -20,10 +20,17 @@ SearchFn = Callable[[str, int], list[Document]]  # (query, k) -> ranked chunks
 
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 YES_NO_RE = re.compile(r"\b(yes|no|да|нет)\b", re.IGNORECASE)
+# The verdict field of a grader reply whose JSON is broken (e.g. an unescaped quote).
+RELEVANT_FIELD_RE = re.compile(r'"relevan\w*"\s*:\s*"?(yes|no|true|false|да|нет)\b', re.IGNORECASE)
+QUOTE_FIELD_RE = re.compile(r'"quote"\s*:\s*"(.*?)"\s*,\s*"relevan', re.DOTALL)
+CITATION_RE = re.compile(r"\[(\d+)\]")
+WORD_RE = re.compile(r"\w{2,}")
 THINK_RE = re.compile(r"<think>.*?(</think>|$)", re.DOTALL | re.IGNORECASE)
 CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
 LATIN_RE = re.compile(r"[a-zA-Z]")
 MAX_BROADEN_QUERIES = 3
+FALLBACK_CHUNKS = 3  # rejected top-ranked chunks used for a low-confidence answer
+RANK_KEYS = ("bm25_rank", "vector_rank")  # per-list ranks set by the search function
 
 
 def strip_thinking(text: str) -> str:
@@ -50,15 +57,64 @@ def parse_json(text: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def parse_relevance(text: str) -> bool:
-    """``True`` for a "yes" verdict; anything unparseable counts as "no"."""
+def parse_grade(text: str) -> tuple[bool, str]:
+    """Grader reply -> (verdict, quote). Only the verdict field decides; unparseable is "no"."""
+    yes = {"yes", "true", "да"}
+    text = text or ""
     data = parse_json(text)
     if data is not None:
         value = str(data.get("relevant", data.get("relevance", ""))).strip().lower()
         if value in {"yes", "no", "true", "false", "да", "нет"}:
-            return value in {"yes", "true", "да"}
-    match = YES_NO_RE.search(text or "")
-    return bool(match) and match.group(1).lower() in {"yes", "да"}
+            return value in yes, str(data.get("quote", "") or "")
+    fields = RELEVANT_FIELD_RE.findall(text)
+    if fields:
+        quote = QUOTE_FIELD_RE.search(text)
+        return fields[-1].lower() in yes, quote.group(1) if quote else ""
+    if "{" in text:
+        return False, ""  # broken JSON without a verdict: its words may come from a quote
+    match = YES_NO_RE.search(text)
+    return bool(match) and match.group(1).lower() in yes, ""
+
+
+def parse_relevance(text: str) -> bool:
+    return parse_grade(text)[0]
+
+
+def normalize_text(text: str) -> str:
+    return " ".join(re.findall(r"\w+", text.lower()))
+
+
+def verified_quote(quote: str, text: str) -> str:
+    """The grader's quote if it really occurs in the chunk (small models invent quotes)."""
+    key = normalize_text(quote)
+    if not key or key in {"none", "нет"} or key not in normalize_text(text):
+        return ""
+    return " ".join(quote.split())
+
+
+def check_citations(answer: str, n_sources: int) -> tuple[str, list[int], bool]:
+    """Drop citations of non-existent fragments.
+
+    Returns (answer, dropped numbers, whether anything besides citations is left).
+    """
+    valid = range(1, n_sources + 1)
+    dropped = sorted({int(n) for n in CITATION_RE.findall(answer)} - set(valid))
+    if dropped:
+        answer = CITATION_RE.sub(lambda m: m.group(0) if int(m.group(1)) in valid else "", answer)
+        answer = re.sub(r"[ \t]+([.,;:])", r"\1", answer).strip()
+    has_content = bool(WORD_RE.search(CITATION_RE.sub(" ", answer)))
+    return answer, dropped, has_content
+
+
+def with_metadata(doc: Document, **extra: Any) -> Document:
+    """Copy of ``doc`` with extra metadata (documents may be shared with the index)."""
+    return Document(id=doc.id, page_content=doc.page_content, metadata={**doc.metadata, **extra})
+
+
+def strong_rank(doc: Document, limit: int) -> bool:
+    """Ranked within ``limit`` in both the BM25 and the vector list."""
+    ranks = [doc.metadata.get(key) for key in RANK_KEYS]
+    return all(r is not None and r <= limit for r in ranks)
 
 
 def question_language(question: str) -> str:
@@ -85,6 +141,14 @@ def unique(items: list[str]) -> list[str]:
 def source_ref(doc: Document) -> str:
     m = doc.metadata
     return f"{m.get('source', '?')}:{m.get('start_line', '?')}-{m.get('end_line', '?')}"
+
+
+def rejected_line(doc: Document, chars: int = 100) -> str:
+    section = doc.metadata.get("section") or ""
+    start = " ".join(doc.page_content.split())[:chars]
+    return (
+        f"- {doc.metadata.get('source', '?')}" + (f" [{section}]" if section else "") + f": {start}"
+    )
 
 
 # --- nodes ------------------------------------------------------------------------------
@@ -119,9 +183,11 @@ class Nodes:
         queries = unique([question, *rewritten])
         return {
             "queries": queries,
+            "rewritten": queries[1:],
             "tried": queries,
             "retries": 0,
             "relevant": [],
+            "rejected": [],
             "seen_ids": [],
             "steps": [f"rewrite: {queries}"],
         }
@@ -133,23 +199,33 @@ class Nodes:
         depth = self.s.retrieve_k + len(seen)
         scores: dict[str, float] = {}
         docs: dict[str, Document] = {}
+        ranks: dict[str, dict[str, int]] = {}  # best BM25 / vector rank over all queries
         for query in state["queries"]:
             for rank, doc in enumerate(self.search(query, depth), 1):
                 if doc.id in seen:
                     continue
                 docs[doc.id] = doc
                 scores[doc.id] = scores.get(doc.id, 0.0) + 1.0 / (self.s.rrf_c + rank)
+                best_ranks = ranks.setdefault(doc.id, {})
+                for key in RANK_KEYS:
+                    value = doc.metadata.get(key)
+                    if value is not None:
+                        best_ranks[key] = min(value, best_ranks.get(key, value))
         best = sorted(scores, key=scores.get, reverse=True)[: self.s.retrieve_k]
-        candidates = [docs[i] for i in best]
+        candidates = [with_metadata(docs[i], **ranks[i]) for i in best]
         return {"candidates": candidates, "steps": [f"retrieve: {len(candidates)} new chunks"]}
 
     def grade(self, state: RAGState) -> dict:
         question, candidates = state["question"], state.get("candidates", [])
+        # The RU/EN rewrites carry the question's terms into the other language: a small
+        # model cannot match a Russian question to an English YAML key on its own.
+        queries = "; ".join(state.get("rewritten") or [question])
         requests = [
             self._messages(
                 prompts.GRADE_SYSTEM,
                 prompts.GRADE_USER.format(
                     question=question,
+                    queries=queries,
                     source=source_ref(doc),
                     text=doc.page_content[: self.s.grade_max_chars],
                 ),
@@ -161,23 +237,39 @@ class Nodes:
             if requests
             else []
         )
-        verdicts = [parse_relevance(reply_text(r)) for r in replies]
-        newly_relevant = [d for d, ok in zip(candidates, verdicts, strict=True) if ok]
+        newly_relevant, rejected = [], []
+        for doc, reply in zip(candidates, replies, strict=True):
+            ok, quote = parse_grade(reply_text(reply))
+            if ok:
+                quote = verified_quote(quote, doc.page_content)
+                newly_relevant.append(with_metadata(doc, grade_quote=quote) if quote else doc)
+            else:
+                rejected.append(doc)
         relevant = [*state.get("relevant", []), *newly_relevant]
+        step = f"grade: {len(newly_relevant)}/{len(candidates)} relevant (total {len(relevant)})"
+        if newly_relevant:
+            step += ": " + ", ".join(source_ref(d) for d in newly_relevant)
         return {
             "relevant": relevant,
+            # Rejected chunks are not graded again (the grader is deterministic) but stay
+            # available to generate as a low-confidence fallback.
+            "rejected": [*state.get("rejected", []), *rejected],
             "seen_ids": [*state.get("seen_ids", []), *(d.id for d in candidates)],
-            "steps": [
-                f"grade: {len(newly_relevant)}/{len(candidates)} relevant (total {len(relevant)})"
-            ],
+            "steps": [step],
         }
 
     def broaden(self, state: RAGState) -> dict:
         tried = state.get("tried", state.get("queries", []))
+        relevant_ids = {d.id for d in state.get("relevant", [])}
+        last_rejected = [d for d in state.get("candidates", []) if d.id not in relevant_ids]
         reply = self._ask(
             self.json_llm,
             prompts.BROADEN_SYSTEM,
-            prompts.BROADEN_USER.format(question=state["question"], tried="; ".join(tried)),
+            prompts.BROADEN_USER.format(
+                question=state["question"],
+                tried="; ".join(tried),
+                rejected="\n".join(rejected_line(d) for d in last_rejected) or "- (none)",
+            ),
         )
         data = parse_json(reply) or {}
         proposed = data.get("queries") if isinstance(data.get("queries"), list) else []
@@ -199,11 +291,23 @@ class Nodes:
     def generate(self, state: RAGState) -> dict:
         question = state["question"]
         language = question_language(question)
+        steps = []
         context_docs = self._fit_context(state.get("relevant", []))
+        low_confidence = False
+        if not context_docs:
+            context_docs = self._fallback(state.get("rejected", []))
+            low_confidence = bool(context_docs)
+            if low_confidence:
+                steps.append(
+                    f"generate: grader accepted nothing, using {len(context_docs)} chunks "
+                    f"ranked in the top {self.s.fallback_max_rank} of both BM25 and vector "
+                    "search (low confidence)"
+                )
         if not context_docs:
             return {
                 "answer": prompts.NOT_FOUND[language],
                 "sources": [],
+                "low_confidence": False,
                 "steps": ["generate: no relevant chunks"],
             }
 
@@ -215,6 +319,15 @@ class Nodes:
             prompts.GENERATE_SYSTEM.format(language=language),
             prompts.GENERATE_USER.format(context=context, question=question),
         )
+        answer, dropped, has_content = check_citations(answer.strip(), len(context_docs))
+        if dropped:
+            steps.append(f"generate: dropped citations of missing fragments {dropped}")
+        if not has_content:
+            # e.g. a bare "[2]": a 3B model sometimes answers with a citation only.
+            steps.append("generate: answer had no content besides citations")
+            answer = self._quotes_answer(context_docs, language)
+        if low_confidence:
+            answer = f"{prompts.LOW_CONFIDENCE_NOTE[language]}\n\n{answer}"
         sources = [
             {
                 "ref": i,
@@ -225,10 +338,31 @@ class Nodes:
             for i, d in enumerate(context_docs, 1)
         ]
         return {
-            "answer": answer.strip(),
+            "answer": answer,
             "sources": sources,
-            "steps": [f"generate: {len(context_docs)} chunks in context"],
+            "low_confidence": low_confidence,
+            "steps": [*steps, f"generate: {len(context_docs)} chunks in context"],
         }
+
+    def _fallback(self, rejected: list[Document]) -> list[Document]:
+        """Rejected chunks that both retrievers ranked high: the grader may be wrong."""
+        limit = self.s.fallback_max_rank
+        if not limit:
+            return []
+        strong = [d for d in rejected if strong_rank(d, limit)]
+        strong.sort(key=lambda d: sum(d.metadata[key] for key in RANK_KEYS))
+        return self._fit_context(strong[:FALLBACK_CHUNKS])
+
+    @staticmethod
+    def _quotes_answer(docs: list[Document], language: str) -> str:
+        """Answer from the grader's verified quotes when generation produced nothing."""
+        lines = [prompts.ANSWER_FAILED[language]]
+        lines += [
+            f"- «{d.metadata['grade_quote']}» [{i}]"
+            for i, d in enumerate(docs, 1)
+            if d.metadata.get("grade_quote")
+        ]
+        return "\n".join(lines)
 
     def _fit_context(self, docs: list[Document]) -> list[Document]:
         out, used = [], 0

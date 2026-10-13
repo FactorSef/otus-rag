@@ -59,7 +59,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["ollama", "pull", "${LLM_MODEL:-qwen2.5:3b}"]
+    entrypoint: ["ollama", "pull", "${LLM_MODEL:-qwen3:4b-instruct-2507-q4_K_M}"]
     restart: "no"
 
 volumes:

@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse
 
 from rag_kb.config import Settings, get_settings
 from rag_kb.graph.builder import build_graph
+from rag_kb.graph.nodes import with_metadata
 from rag_kb.indexing.indexer import IndexingError
 from rag_kb.indexing.jobs import IndexingInProgressError
 from rag_kb.knowledge_base import EmptyIndexError, KnowledgeBase
@@ -59,7 +60,11 @@ def create_server(
             m = models or create_chat_models(settings)
 
             def search(query: str, k: int):
-                return [hit.doc for hit in kb.search(query, k)]
+                # Per-list ranks let the graph tell chunks both retrievers rank high.
+                return [
+                    with_metadata(hit.doc, bm25_rank=hit.bm25_rank, vector_rank=hit.vector_rank)
+                    for hit in kb.search(query, k)
+                ]
 
             compiled["graph"] = build_graph(m.chat, search, settings, json_llm=m.json)
         return compiled["graph"]
@@ -162,6 +167,7 @@ def create_server(
             "answer": state.get("answer", ""),
             "sources": state.get("sources", []),
             "relevant_chunks": len(state.get("relevant", [])),
+            "low_confidence": state.get("low_confidence", False),
             "retries": state.get("retries", 0),
             "steps": steps,
         }

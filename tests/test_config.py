@@ -50,3 +50,13 @@ def test_env_example_matches_defaults():
 def test_invalid(overrides):
     with pytest.raises(ValidationError):
         make(**overrides)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+def test_chat_models_cap_reply_length(provider):
+    from rag_kb.llm import create_chat_models
+
+    models = create_chat_models(make(llm_provider=provider, llm_base_url="http://x:1/v1"))
+    key = "num_predict" if provider == "ollama" else "max_tokens"
+    assert getattr(models.chat, key) == 1024
+    assert getattr(models.json, key) == 384
