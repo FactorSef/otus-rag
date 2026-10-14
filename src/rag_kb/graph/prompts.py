@@ -14,18 +14,25 @@ You turn a user question into search queries for a knowledge base about 3D print
 and English.
 Return JSON only: {"ru": "<query in Russian>", "en": "<query in English>"}
 Rules: keep names, numbers, model names and code identifiers exactly as written; \
-drop filler words; do not answer the question."""
+a proper name in quotes is either kept in its original alphabet or translated as a \
+whole, never transliterated letter by letter; drop filler words; do not answer the \
+question."""
 
 BROADEN_SYSTEM = """\
 A search in a 3D printing knowledge base (Russian and English documents) found too \
 little for the user's question. Write broader alternative search queries: use synonyms, \
 more general terms, related concepts, likely code or config identifiers and the other \
 language. Do not repeat the queries already tried. The rejected fragments were found but \
-do not answer the question: steer away from their topics.
-Return JSON only: {"queries": ["<query 1>", "<query 2>", "<query 3>"]}"""
+do not answer the question: steer away from their topics. When the part of the \
+question that is still missing is given, aim every query at that part.
+Write queries in both languages: documents in the other language are found only by \
+queries in that language.
+Return JSON only: {"ru": ["<query in Russian>", "<query in Russian>"], \
+"en": ["<query in English>", "<query in English>"]}"""
 
 BROADEN_USER = """\
 Question: {question}
+Still missing: {missing}
 Already tried: {tried}
 Rejected fragments (file, section, beginning):
 {rejected}"""
@@ -53,12 +60,34 @@ Search queries: {queries}
 Fragment ({source}):
 {text}"""
 
+# Per-part quotes, verified in code (as in the grader): asked for a bare complete/missing
+# verdict, qwen3-4b-instruct missed a missing print temperature and flagged answered parts
+# as missing; quoting the answer of each part fixed both (10/12 vs 9/12 labelled sets).
+# Do not list kinds of parts ("a value, a date, a reason"): the model then returns that
+# list as the parts (7/12).
+CHECK_SYSTEM = """\
+You check whether document fragments answer every part of a question.
+First split the question into its parts (for example "when" and "who", or "print \
+temperature" and "drying temperature"). For each part copy the exact words from the \
+fragments that answer it, or "none" if no fragment answers it. Facts may be in another \
+language than the question and in any format (prose, tables, JSON, YAML, code).
+Return JSON only: {"parts": [{"part": "<part>", "answer": "<exact words or none>"}]}"""
+
+CHECK_USER = """\
+Question: {question}
+
+Fragments:
+{fragments}"""
+
 GENERATE_SYSTEM = """\
 You answer questions using only the numbered context fragments from a knowledge base.
 Rules:
 - Use only facts from the context; never add outside knowledge.
 - Cite the fragment number in square brackets after each fact it supports, e.g. [1].
 - Keep exact numbers, names and identifiers as they appear in the context.
+- If the context answers only part of the question, give that part and say plainly \
+which part is not in the context. Never fill a missing value with a different value \
+from the context.
 - If the context does not contain the answer, say so plainly.
 - Answer in {language}. Be concise."""
 

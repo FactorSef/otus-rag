@@ -145,3 +145,14 @@ def test_bm25_follows_collection_reset(settings, docs_dir: Path):
     kb.store.save_state({"embedding_id": kb.embedding_id})
     sources = {h.doc.id for h in kb.search("PURGE_LINE_LENGTH_MM Сойка", 10)}
     assert sources == {kb._bm25.docs[0].id}  # no hits from wiped chunks
+
+
+def test_neighbors_are_adjacent_chunks_of_the_same_file(kb, docs_dir):
+    kb.index_folder(docs_dir)
+    docs = [d for d in kb.store.all_documents() if d.metadata["source"].endswith("guide.md")]
+    docs.sort(key=lambda d: d.metadata["chunk_index"])
+    assert len(docs) >= 3
+    middle = docs[1]
+    assert [d.id for d in kb.neighbors(middle)] == [docs[0].id, docs[2].id]
+    assert [d.id for d in kb.neighbors(docs[0])] == [docs[1].id]  # no index -1
+    assert kb.neighbors(middle, window=0) == []

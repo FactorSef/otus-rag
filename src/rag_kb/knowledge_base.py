@@ -10,10 +10,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from rag_kb.config import Settings
-from rag_kb.indexing.chunkers import Chunker
+from rag_kb.indexing.chunkers import Chunker, chunk_id
 from rag_kb.indexing.indexer import Indexer, IndexReport
 from rag_kb.indexing.jobs import IndexingInProgressError, IndexJob, JobRunner
 from rag_kb.retrieval.bm25 import BM25Index
@@ -135,6 +136,18 @@ class KnowledgeBase:
             # The collection was reset by a running rebuild: drop BM25 hits of wiped chunks.
             self._rebuild_bm25()
         return self.search_engine.search(query, k)
+
+    def neighbors(self, doc: Document, window: int = 1) -> list[Document]:
+        """Chunks of the same file within ``window`` positions of ``doc``, in file order.
+
+        Chunk ids are derived from (source, chunk index), so neighbours are looked up
+        directly; ``doc`` itself is not included.
+        """
+        source, index = doc.metadata.get("source"), doc.metadata.get("chunk_index")
+        if source is None or index is None or window < 1:
+            return []
+        positions = [i for i in range(index - window, index + window + 1) if i >= 0 and i != index]
+        return self.store.get([chunk_id(source, i) for i in positions])
 
     def status(self) -> dict[str, Any]:
         state = self.store.load_state()

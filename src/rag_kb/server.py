@@ -26,7 +26,8 @@ STEP_LABELS = {
     "rewrite": "Rewrote the question into search queries",
     "retrieve": "Searched the knowledge base (BM25 + vector)",
     "grade": "Graded retrieved chunks for relevance",
-    "broaden": "Too few relevant chunks: broadening the query",
+    "check": "Checked that the facts cover the whole question",
+    "broaden": "Not enough found: broadening the query",
     "generate": "Generated the answer",
 }
 
@@ -66,7 +67,13 @@ def create_server(
                     for hit in kb.search(query, k)
                 ]
 
-            compiled["graph"] = build_graph(m.chat, search, settings, json_llm=m.json)
+            compiled["graph"] = build_graph(
+                m.chat,
+                search,
+                settings,
+                json_llm=m.json,
+                neighbors=lambda doc: kb.neighbors(doc, settings.context_neighbors),
+            )
         return compiled["graph"]
 
     topic = settings.kb_topic

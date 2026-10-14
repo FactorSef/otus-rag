@@ -89,6 +89,7 @@ async def run_case(client: Client, fact: dict, phrasing: str, top_k: int) -> dic
     accepted = not low and any(matches(s["source"], files) for s in answer.get("sources", []))
     return {
         "id": fact["id"],
+        "control": bool(fact.get("control")),
         "phrasing": phrasing,
         "query": query,
         "retrieval": bool(ranks),
@@ -123,15 +124,26 @@ def report(rows: list[dict], llm: dict, top_k: int) -> str:
             + (f" ({r['error']})" if r.get("error") else "")
             + " |"
         )
-    lines += ["", f"| phrasing | retrieval@{top_k} | grader | answer |", "|---|---|---|---|"]
-    for phrasing in [*PHRASINGS, "all"]:
-        sel = [r for r in rows if phrasing in ("all", r["phrasing"])]
-        if not sel:
-            continue
-        cells = [
-            f"{sum(r[k] for r in sel)}/{len(sel)}" for k in ("retrieval", "grader", "answer_ok")
-        ]
-        lines.append(f"| {phrasing} | " + " | ".join(cells) + " |")
+    lines += [
+        "",
+        f"| facts | phrasing | retrieval@{top_k} | grader | answer |",
+        "|---|---|---|---|---|",
+    ]
+    # Control facts were added before tuning the graph and never used to tune it: if the
+    # main set improves and the control set does not, the change overfits the main set.
+    for group, control in (("main", False), ("control", True)):
+        for phrasing in [*PHRASINGS, "all"]:
+            sel = [
+                r
+                for r in rows
+                if r.get("control", False) == control and phrasing in ("all", r["phrasing"])
+            ]
+            if not sel:
+                continue
+            cells = [
+                f"{sum(r[k] for r in sel)}/{len(sel)}" for k in ("retrieval", "grader", "answer_ok")
+            ]
+            lines.append(f"| {group} | {phrasing} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 

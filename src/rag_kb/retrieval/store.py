@@ -95,6 +95,18 @@ class ChromaStore:
             for i, d, m in zip(got["ids"], got["documents"], got["metadatas"], strict=True)
         ]
 
+    def get(self, ids: list[str]) -> list[Document]:
+        """Chunks by id, in the order of ``ids``; missing ids are skipped."""
+        if not ids:
+            return []
+        with self._lock:
+            got = self._collection.get(ids=ids, include=["documents", "metadatas"])
+        found = {
+            i: Document(id=i, page_content=d, metadata=m)
+            for i, d, m in zip(got["ids"], got["documents"], got["metadatas"], strict=True)
+        }
+        return [found[i] for i in ids if i in found]
+
     def query(self, vector: list[float], k: int) -> list[tuple[Document, float]]:
         """Nearest chunks with cosine similarity (1 - distance)."""
         with self._lock:

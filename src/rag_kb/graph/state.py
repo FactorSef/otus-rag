@@ -10,6 +10,7 @@ class RAGState(TypedDict, total=False):
     question: str
     queries: list[str]  # search queries of the current iteration
     rewritten: list[str]  # RU/EN rewrites of the question (shown to the grader)
+    missing: str  # part of the question the accepted facts do not answer (from check)
     tried: list[str]  # every query searched so far (shown to broaden, never repeated)
     candidates: list[Document]  # chunks retrieved in this iteration, not graded yet
     relevant: list[Document]  # graded relevant, accumulated across iterations

@@ -10,6 +10,8 @@
 # expect  — что должно быть в ответе: список групп. Нужны все группы; внутри группы
 #           достаточно одного варианта. Сравнение без учёта регистра, «4,35» = «4.35»,
 #           «18 600» = «18600».
+# control — контрольный факт: добавлен до доработок графа и не использовался для их
+#           подбора. Если основные факты растут, а контрольные нет — это подгонка под тест.
 
 facts:
   - id: 1
@@ -84,7 +86,7 @@ facts:
 
   - id: 10
     question: Какой размер и допуск у калибровочного «Гусиного кубика»?
-    keywords: Goose Cube outer size tolerance
+    keywords: Goose Cube outer size and tolerance
     files: [lab/calibration/goose_cube.md, lab/procedures/printer_onboarding.md]
     expect:
       - ["23.7"]
@@ -101,7 +103,7 @@ facts:
 
   - id: 12
     question: "На каком слое упало задание #4367 и почему?"
-    keywords: "#4367 FAILED layer"
+    keywords: "#4367 FAILED layer reason"
     files: [lab/logs/print_log_2025-09.txt]
     expect:
       - ["212"]
@@ -113,3 +115,57 @@ facts:
     files: [lab/incidents/2025-08-02-mamont-z-crash.md]
     expect:
       - ["концевик", "endstop"]
+
+  # ---- контрольные факты (добавлены 13.10.2026, до доработок графа) ----
+
+  - id: 14
+    control: true
+    question: В каком помещении хранят филамент и какая там допустимая влажность?
+    keywords: сухая комната филамент влажность
+    files: [lab/procedures/filament_storage.md]
+    expect:
+      - ["Б-16", "Б16", "B-16"]
+      - ["25"]
+
+  - id: 15
+    control: true
+    question: Какой принтер никогда не печатает ночью без присмотра?
+    keywords: NO_NIGHT_PRINTING
+    files: [lab/tools/queue.js, lab/procedures/night_shift.md]
+    expect:
+      - ["Сойк", "soyka"]
+
+  - id: 16
+    control: true
+    question: При какой температуре и сколько часов сушить TPU «Болотный»?
+    keywords: Swamp TPU 95A drying
+    files: [lab/filaments.json, lab/procedures/filament_storage.md]
+    expect:
+      - ["50"]
+      - ["8 ч", "8 час", "8 h", "\"hours\": 8", "8 hours"]
+
+  - id: 17
+    control: true
+    question: Какой ущерб нанёс инцидент «синее облако» на «Кедре»?
+    keywords: blue cloud incident damage RUB
+    files: [lab/incidents/2025-03-17-blue-cloud.md]
+    expect:
+      - ["18600"]
+
+  - id: 18
+    control: true
+    question: Что решили на планёрке 29 сентября 2025 года о повышении цены грамма?
+    keywords: планёрка цены 4,60 отложить
+    files: [lab/meetings/2025-09-29-planning.md]
+    expect:
+      - ["4.6"]
+      - ["отлож", "декабр", "postpone", "december"]
+
+  - id: 19
+    control: true
+    question: Почему концевик оси Z на «Мамонте» не сработал при хоминге?
+    keywords: Mamont Z endstop root cause normally-open broken wire
+    files: [lab/incidents/2025-08-02-mamont-z-crash.md]
+    expect:
+      - ["провод", "кабел", "wire", "cable"]
+      - ["нормально разомкн", "нормально открыт", "normally-open", "normally open"]

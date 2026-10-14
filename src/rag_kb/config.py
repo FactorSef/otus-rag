@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     # the answer text) and spends 40+ s per call on CPU.
     llm_model: str = "qwen3:4b-instruct-2507-q4_K_M"
     llm_temperature: float = Field(0.0, ge=0.0, le=2.0)
-    llm_timeout_s: float = Field(120.0, gt=0)
+    # Includes waiting in the server queue: on CPU, parallel grading requests queue up in
+    # Ollama, and 120 s was hit while no reply exceeded ~60 s of generation.
+    llm_timeout_s: float = Field(300.0, gt=0)
     # Appended to every user prompt: model-specific switches, e.g. "/no_think" for qwen3
     # (disables slow reasoning). Empty for models without such switches.
     llm_prompt_suffix: str = ""
@@ -97,6 +99,14 @@ class Settings(BaseSettings):
     # When the grader rejects everything, chunks ranked within the top N of BOTH the BM25
     # and the vector list are still used for the answer, marked as low confidence (0 = off).
     fallback_max_rank: int = Field(10, ge=0)
+    # Adjacent chunks (same file, chunk index +/- N) of every relevant chunk are added to
+    # the answer context while the budget allows: a "why" is often in the next section
+    # of the "what happened" chunk the grader accepted (0 = off).
+    context_neighbors: int = Field(1, ge=0)
+    # Before answering, the LLM checks whether the accepted facts cover every part of the
+    # question; if not, the graph broadens the search for the missing part (one extra LLM
+    # call per round).
+    completeness_check: bool = True
 
     @model_validator(mode="after")
     def _check_consistency(self) -> Self:

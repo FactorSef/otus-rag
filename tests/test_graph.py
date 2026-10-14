@@ -11,6 +11,8 @@ from rag_kb.graph import prompts
 from rag_kb.graph.builder import build_graph
 from rag_kb.graph.nodes import (
     check_citations,
+    mixed_script,
+    parse_check,
     parse_grade,
     parse_relevance,
     question_language,
@@ -51,12 +53,15 @@ def llm_for(
     relevant_ids: set[str],
     rewrite='{"ru": "Сойка e-steps", "en": "Soyka e-steps"}',
     broaden='{"queries": ["калибровка экструдера", "extruder calibration"]}',
+    check='{"parts": []}',
 ):
     def handler(system: str, user: str) -> str:
         if system == prompts.REWRITE_SYSTEM:
             return rewrite
         if system == prompts.BROADEN_SYSTEM:
             return broaden
+        if system == prompts.CHECK_SYSTEM:
+            return check
         if system == prompts.GRADE_SYSTEM:
             ok = any(f"doc{i[1:]}.md" in user for i in relevant_ids)
             return json.dumps({"relevant": "yes" if ok else "no"})
@@ -80,7 +85,7 @@ def test_direct_path_without_retries(settings):
     result = run(llm, search, settings)
 
     steps = [s.split(":")[0] for s in result["steps"]]
-    assert steps == ["rewrite", "retrieve", "grade", "generate"]
+    assert steps == ["rewrite", "retrieve", "grade", "check", "generate"]
     assert result["retries"] == 0
     assert "97.3" in result["answer"]
     assert [s["source"] for s in result["sources"]] == ["lab/doc1.md", "lab/doc2.md"]
@@ -98,7 +103,16 @@ def test_broaden_loop_finds_more(settings):
     result = run(llm, search, settings)
 
     steps = [s.split(":")[0] for s in result["steps"]]
-    assert steps == ["rewrite", "retrieve", "grade", "broaden #1", "retrieve", "grade", "generate"]
+    assert steps == [
+        "rewrite",
+        "retrieve",
+        "grade",
+        "broaden #1",
+        "retrieve",
+        "grade",
+        "check",
+        "generate",
+    ]
     assert result["retries"] == 1
     assert {d.id for d in result["relevant"]} == {"c1", "c5", "c6"}
     # chunks graded in the first loop are not graded again
@@ -317,3 +331,160 @@ def test_broaden_is_told_what_was_rejected(settings):
     first = llm.calls_to(prompts.BROADEN_SYSTEM)[0]
     assert "- lab/doc3.md: Сушка филамента PETG" in first
     assert "- lab/doc4.md: Klipper pressure advance" in first
+
+
+# --- completeness check, adjacent chunks, garbled rewrites -------------------------------
+
+
+def test_missing_part_is_searched_for(settings):
+    checks = iter(
+        [
+            '{"parts": [{"part": "e-steps", "answer": "97.3"},'
+            ' {"part": "print temperature", "answer": "none"}]}',
+            '{"parts": [{"part": "e-steps", "answer": "97.3"}]}',
+        ]
+    )
+
+    def handler(system: str, user: str) -> str:
+        if system == prompts.CHECK_SYSTEM:
+            return next(checks)
+        return llm_for({"c1", "c2", "c5"}).handler(system, user)
+
+    llm = ScriptedChatModel(handler=handler)
+    search = FakeSearch({"калибровка": HIDDEN}, default=[*RELEVANT, *NOISE])
+    result = run(llm, search, settings)
+
+    steps = [s.split(":")[0] for s in result["steps"]]
+    assert steps == [
+        "rewrite",
+        "retrieve",
+        "grade",
+        "check",
+        "broaden #1",
+        "retrieve",
+        "grade",
+        "check",
+        "generate",
+    ]
+    assert "check: missing 'print temperature'" in result["steps"]
+    assert "Still missing: print temperature" in llm.calls_to(prompts.BROADEN_SYSTEM)[0]
+    assert {d.id for d in result["relevant"]} == {"c1", "c2", "c5"}
+
+
+def test_check_is_skipped_without_retries_or_when_disabled(settings):
+    search = FakeSearch({}, default=[*RELEVANT, *NOISE])
+    for update in ({"max_retries": 0}, {"completeness_check": False}):
+        llm = llm_for({"c1", "c2"}, check='{"parts": [{"part": "x", "answer": "none"}]}')
+        result = run(llm, search, settings.model_copy(update=update))
+        assert not llm.calls_to(prompts.CHECK_SYSTEM)
+        assert result["steps"][-1].startswith("generate")
+
+
+FRAGMENTS = '(lab/filaments.json:3-19)\n"nozzle_temp": 236,\n"drying": {"temp": 61, "hours": 6}'
+
+
+@pytest.mark.parametrize(
+    ("parts", "missing"),
+    [
+        ([{"part": "print", "answer": '"nozzle_temp": 236'}], []),
+        ([{"part": "print", "answer": "NOZZLE_TEMP 236"}], []),  # compared word by word
+        ([{"part": "print", "answer": "236"}, {"part": "bed", "answer": "none"}], ["bed"]),
+        ([{"part": "bed", "answer": "83"}], ["bed"]),  # invented: not in the fragments
+        ([{"part": "bed", "answer": ""}], ["bed"]),
+        ([], []),
+    ],
+)
+def test_parse_check(parts, missing):
+    assert parse_check(json.dumps({"parts": parts}), FRAGMENTS) == missing
+
+
+def test_unparseable_check_costs_no_search_round():
+    assert parse_check("not json", FRAGMENTS) == []
+    assert parse_check('{"parts": "all good"}', FRAGMENTS) == []
+
+
+def test_broaden_queries_alternate_languages(settings):
+    llm = llm_for(
+        set(),
+        broaden='{"ru": ["температура печати", "сопло"], "en": ["nozzle_temp", "print temp"]}',
+    )
+    result = run(llm, FakeSearch({}, default=NOISE), settings)
+    first = next(s for s in result["steps"] if s.startswith("broaden #1"))
+    # MAX_BROADEN_QUERIES = 3 keeps both languages: ru, en, ru
+    assert first == "broaden #1: ['температура печати', 'nozzle_temp', 'сопло']"
+
+
+def test_mixed_alphabet_rewrites_are_dropped(settings):
+    llm = llm_for(
+        {"c1", "c2"},
+        rewrite='{"ru": "Сойка e-steps", "en": "e-steps of Sойка printer"}',
+    )
+    search = FakeSearch({}, default=[*RELEVANT, *NOISE])
+    result = run(llm, search, settings)
+    assert search.queries == [QUESTION, "Сойка e-steps"]
+    assert "dropped mixed-alphabet" in result["steps"][0]
+    assert mixed_script("Dымчатый кварц")
+    assert not mixed_script("e-steps у принтера Сойка, PURGE_LINE_LENGTH_MM 143")
+
+
+def numbered(i: int, index: int, text: str, source: str = "lab/incident.md") -> Document:
+    meta = {"source": source, "chunk_index": index, "start_line": index, "end_line": index}
+    return Document(id=f"n{i}", page_content=text, metadata={**meta, "section": ""})
+
+
+def accept_all_llm():
+    """Grader accepts every chunk; everything else as in ``llm_for``."""
+    base = llm_for(set()).handler
+    return ScriptedChatModel(
+        handler=lambda system, user: (
+            '{"relevant": "yes"}' if system == prompts.GRADE_SYSTEM else base(system, user)
+        )
+    )
+
+
+def test_adjacent_chunks_are_added_in_file_order(settings):
+    header = numbered(0, 0, "Incident report header")
+    what = numbered(1, 1, "What happened: the nozzle drove into the bed")
+    cause = numbered(2, 2, "Root cause: broken endstop cable")
+    by_index = {0: header, 1: what, 2: cause}
+
+    def neighbors(doc):
+        i = doc.metadata["chunk_index"]
+        return [by_index[j] for j in (i - 1, i + 1) if j in by_index]
+
+    llm = accept_all_llm()
+    # Search finds only the "what happened" chunk; the cause is in the next one.
+    graph = build_graph(llm, FakeSearch({}, default=[what]), settings, neighbors=neighbors)
+    result = graph.invoke({"question": QUESTION})
+
+    assert [s["lines"] for s in result["sources"]] == ["0-0", "1-1", "2-2"]
+    assert [s.get("adjacent", False) for s in result["sources"]] == [True, False, True]
+    context = llm.calls_to("You answer")[0]
+    assert context.index("header") < context.index("What happened") < context.index("Root cause")
+    assert "generate: +2 adjacent chunks of the same files" in result["steps"]
+
+
+def test_adjacent_chunks_respect_context_budget(settings):
+    main = numbered(1, 1, "x" * 600)
+    small = numbered(0, 0, "z" * 100)
+    big = numbered(2, 2, "y" * 600)
+    tight = settings.model_copy(update={"max_context_chars": 1000, "max_retries": 0})
+    graph = build_graph(
+        accept_all_llm(), FakeSearch({}, [main]), tight, neighbors=lambda d: [small, big]
+    )
+    result = graph.invoke({"question": QUESTION})
+    assert [s["lines"] for s in result["sources"]] == ["0-0", "1-1"]  # 600 + 100 fits, +600 not
+
+
+def test_every_query_keeps_its_top_hit(settings):
+    # Two Russian queries agree on the same chunks and outvote the English one in summed
+    # RRF; the English query's only (and best) hit must still reach the grader.
+    ru = [chunk(i, f"ru {i}") for i in range(10, 16)]
+    en_hit = chunk(20, "Smoky Quartz PETG nozzle_temp 236")
+    table = {"сойка": ru, "soyka": [en_hit]}
+    llm = llm_for(set(), rewrite='{"ru": "Сойка температура", "en": "Soyka temperature"}')
+    small = settings.model_copy(update={"max_retries": 0})
+    run(llm, FakeSearch(table, default=ru), small)
+    graded = llm.calls_to(prompts.GRADE_SYSTEM)
+    assert any("doc20.md" in user for user in graded)
+    assert len(graded) == small.retrieve_k

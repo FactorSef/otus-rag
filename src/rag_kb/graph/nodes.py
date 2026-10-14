@@ -17,6 +17,7 @@ from rag_kb.graph.state import RAGState
 logger = logging.getLogger(__name__)
 
 SearchFn = Callable[[str, int], list[Document]]  # (query, k) -> ranked chunks
+NeighborFn = Callable[[Document], list[Document]]  # chunk -> adjacent chunks of its file
 
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 YES_NO_RE = re.compile(r"\b(yes|no|да|нет)\b", re.IGNORECASE)
@@ -117,6 +118,47 @@ def strong_rank(doc: Document, limit: int) -> bool:
     return all(r is not None and r <= limit for r in ranks)
 
 
+def mixed_script(query: str) -> bool:
+    """A word mixing Cyrillic and Latin letters ("Dымчатый"): a garbled transliteration.
+
+    Such a query matches nothing in BM25 and misleads the grader, so it is dropped.
+    """
+    return any(
+        CYRILLIC_RE.search(word) and LATIN_RE.search(word)
+        for word in re.findall(r"[^\W\d_]+", query)
+    )
+
+
+def parse_check(text: str, fragments: str) -> list[str]:
+    """Completeness reply -> the parts of the question left unanswered.
+
+    A part counts as answered only if its quoted answer really occurs in the fragments
+    (compared word by word, like the grader's quote). An unparseable reply means
+    "nothing missing": a broken check must not cost an extra search round.
+    """
+    data = parse_json(text)
+    parts = data.get("parts") if data else None
+    if not isinstance(parts, list):
+        return []
+    haystack = normalize_text(fragments)
+    missing = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        answer = normalize_text(str(part.get("answer", "") or ""))
+        if not answer or answer in {"none", "нет"} or answer not in haystack:
+            missing.append(str(part.get("part", "") or "?").strip())
+    return missing
+
+
+def interleave(*lists: list) -> list:
+    """[a1, a2], [b1, b2] -> [a1, b1, a2, b2]: a truncated list keeps both languages."""
+    out = []
+    for i in range(max((len(x) for x in lists), default=0)):
+        out += [x[i] for x in lists if i < len(x)]
+    return out
+
+
 def question_language(question: str) -> str:
     cyr = len(CYRILLIC_RE.findall(question))
     lat = len(LATIN_RE.findall(question))
@@ -136,6 +178,10 @@ def unique(items: list[str]) -> list[str]:
             seen.add(key)
             out.append(item.strip())
     return out
+
+
+def unique_ids(ids: list[str]) -> list[str]:
+    return list(dict.fromkeys(ids))
 
 
 def source_ref(doc: Document) -> str:
@@ -161,10 +207,12 @@ class Nodes:
         json_llm: BaseChatModel,
         search: SearchFn,
         settings: Settings,
+        neighbors: NeighborFn | None = None,
     ) -> None:
         self.llm = llm
         self.json_llm = json_llm
         self.search = search
+        self.neighbors = neighbors
         self.s = settings
 
     def _messages(self, system: str, user: str) -> list:
@@ -179,8 +227,12 @@ class Nodes:
         question = state["question"]
         data = parse_json(self._ask(self.json_llm, prompts.REWRITE_SYSTEM, question)) or {}
         rewritten = [str(v) for k, v in data.items() if k in {"ru", "en"} and v]
+        garbled = [q for q in rewritten if mixed_script(q)]
         # The original question stays: a small model may garble exact identifiers.
-        queries = unique([question, *rewritten])
+        queries = unique([question, *(q for q in rewritten if q not in garbled)])
+        step = f"rewrite: {queries}"
+        if garbled:
+            step += f" (dropped mixed-alphabet {garbled})"
         return {
             "queries": queries,
             "rewritten": queries[1:],
@@ -189,7 +241,8 @@ class Nodes:
             "relevant": [],
             "rejected": [],
             "seen_ids": [],
-            "steps": [f"rewrite: {queries}"],
+            "missing": "",
+            "steps": [step],
         }
 
     def retrieve(self, state: RAGState) -> dict:
@@ -200,10 +253,13 @@ class Nodes:
         scores: dict[str, float] = {}
         docs: dict[str, Document] = {}
         ranks: dict[str, dict[str, int]] = {}  # best BM25 / vector rank over all queries
+        firsts: list[str] = []  # best new chunk of every query
         for query in state["queries"]:
+            first = None
             for rank, doc in enumerate(self.search(query, depth), 1):
                 if doc.id in seen:
                     continue
+                first = first or doc.id
                 docs[doc.id] = doc
                 scores[doc.id] = scores.get(doc.id, 0.0) + 1.0 / (self.s.rrf_c + rank)
                 best_ranks = ranks.setdefault(doc.id, {})
@@ -211,7 +267,13 @@ class Nodes:
                     value = doc.metadata.get(key)
                     if value is not None:
                         best_ranks[key] = min(value, best_ranks.get(key, value))
-        best = sorted(scores, key=scores.get, reverse=True)[: self.s.retrieve_k]
+            if first and first not in firsts:
+                firsts.append(first)
+        # Every query's top hit is kept before fusion fills the rest: summed RRF lets two
+        # similar Russian queries outvote the only English one, whose rank-1 hit (the
+        # English file with the answer) then never reached the grader.
+        fused = sorted(scores, key=scores.get, reverse=True)
+        best = unique_ids([*firsts, *fused])[: self.s.retrieve_k]
         candidates = [with_metadata(docs[i], **ranks[i]) for i in best]
         return {"candidates": candidates, "steps": [f"retrieve: {len(candidates)} new chunks"]}
 
@@ -267,14 +329,20 @@ class Nodes:
             prompts.BROADEN_SYSTEM,
             prompts.BROADEN_USER.format(
                 question=state["question"],
+                missing=state.get("missing") or "(unknown)",
                 tried="; ".join(tried),
                 rejected="\n".join(rejected_line(d) for d in last_rejected) or "- (none)",
             ),
         )
         data = parse_json(reply) or {}
-        proposed = data.get("queries") if isinstance(data.get("queries"), list) else []
+        lists = [data.get(key) for key in ("ru", "en", "queries")]
+        proposed = interleave(*(x for x in lists if isinstance(x, list)))
         tried_keys = {query_key(q) for q in tried}
-        queries = [q for q in unique([str(q) for q in proposed]) if query_key(q) not in tried_keys]
+        queries = [
+            q
+            for q in unique([str(q) for q in proposed])
+            if query_key(q) not in tried_keys and not mixed_script(q)
+        ]
         if not queries:
             # Nothing new from the model: search the question again. retrieve skips the
             # chunks graded so far and goes deeper, so this still brings new material.
@@ -287,6 +355,28 @@ class Nodes:
             "retries": retries,
             "steps": [f"broaden #{retries}: {queries}"],
         }
+
+    def check(self, state: RAGState) -> dict:
+        """Do the accepted facts answer every part of the question?
+
+        Enough relevant chunks is not enough: "print and dry temperature" with only the
+        drying table found would otherwise stop the search and get a half answer.
+        """
+        # Full chunk text, not the grader's quote: a quote is one line of the chunk, and
+        # the check then reported answered parts (in the rest of the chunk) as missing.
+        docs = self._fit_context(state.get("relevant", []))
+        fragments = "\n\n".join(
+            f"({source_ref(d)})\n{d.page_content[: self.s.grade_max_chars]}" for d in docs
+        )
+        reply = self._ask(
+            self.json_llm,
+            prompts.CHECK_SYSTEM,
+            prompts.CHECK_USER.format(question=state["question"], fragments=fragments),
+        )
+        missing = "; ".join(parse_check(reply, fragments))
+        if not missing:
+            return {"missing": "", "steps": ["check: complete"]}
+        return {"missing": missing, "steps": [f"check: missing {missing!r}"]}
 
     def generate(self, state: RAGState) -> dict:
         question = state["question"]
@@ -310,6 +400,9 @@ class Nodes:
                 "low_confidence": False,
                 "steps": ["generate: no relevant chunks"],
             }
+        context_docs, added = self._with_neighbors(context_docs)
+        if added:
+            steps.append(f"generate: +{added} adjacent chunks of the same files")
 
         context = "\n\n".join(
             f"[{i}] ({source_ref(d)})\n{d.page_content}" for i, d in enumerate(context_docs, 1)
@@ -334,6 +427,7 @@ class Nodes:
                 "source": d.metadata.get("source"),
                 "lines": f"{d.metadata.get('start_line')}-{d.metadata.get('end_line')}",
                 "section": d.metadata.get("section", ""),
+                **({"adjacent": True} if d.metadata.get("adjacent") else {}),
             }
             for i, d in enumerate(context_docs, 1)
         ]
@@ -364,6 +458,32 @@ class Nodes:
         ]
         return "\n".join(lines)
 
+    def _with_neighbors(self, docs: list[Document]) -> tuple[list[Document], int]:
+        """Add adjacent chunks of the same files while the context budget allows.
+
+        Graded chunks keep priority (they are already in ``docs``); each neighbour is
+        placed next to its chunk so a file reads in order. Returns (context, added).
+        """
+        if not self.neighbors or not self.s.context_neighbors:
+            return docs, 0
+        used = sum(len(d.page_content) for d in docs)
+        taken = {d.id for d in docs}
+        before: dict[str, list[Document]] = {}
+        after: dict[str, list[Document]] = {}
+        for doc in docs:
+            index = doc.metadata.get("chunk_index", 0)
+            for near in self.neighbors(doc):
+                if near.id in taken or used + len(near.page_content) > self.s.max_context_chars:
+                    continue
+                taken.add(near.id)
+                used += len(near.page_content)
+                side = before if near.metadata.get("chunk_index", 0) < index else after
+                side.setdefault(doc.id, []).append(with_metadata(near, adjacent=True))
+        out = []
+        for doc in docs:
+            out += [*before.get(doc.id, []), doc, *after.get(doc.id, [])]
+        return out, len(out) - len(docs)
+
     def _fit_context(self, docs: list[Document]) -> list[Document]:
         out, used = [], 0
         for doc in docs:
@@ -375,9 +495,14 @@ class Nodes:
 
     # --- routing ----------------------------------------------------------------------
 
-    def route_after_grade(self, state: RAGState) -> Literal["generate", "broaden"]:
+    def route_after_grade(self, state: RAGState) -> Literal["check", "generate", "broaden"]:
+        can_retry = state.get("retries", 0) < self.s.max_retries
         if len(state.get("relevant", [])) >= self.s.min_relevant:
-            return "generate"
-        if state.get("retries", 0) < self.s.max_retries:
+            # The check only matters if a missing part could still be searched for.
+            return "check" if self.s.completeness_check and can_retry else "generate"
+        if can_retry:
             return "broaden"
         return "generate"  # retry budget spent: answer with what we have (or say not found)
+
+    def route_after_check(self, state: RAGState) -> Literal["generate", "broaden"]:
+        return "broaden" if state.get("missing") else "generate"
